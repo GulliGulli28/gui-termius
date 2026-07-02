@@ -10,6 +10,7 @@ pub struct Entry {
     pub is_dir: bool,
     pub is_symlink: bool,
     pub size: u64,
+    pub modified: Option<u64>,
 }
 
 pub struct SftpClient {
@@ -40,10 +41,11 @@ impl SftpClient {
                     is_dir: metadata.file_type().is_dir(),
                     is_symlink: metadata.file_type().is_symlink(),
                     size: metadata.len(),
+                    modified: metadata.mtime.map(|t| t as u64),
                 }
             })
             .collect();
-        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        entries.retain(|e| e.name != "." && e.name != "..");
         Ok(entries)
     }
 

@@ -255,6 +255,17 @@ pub fn add_snippet(state: State<'_, AppState>, name: String, command: String) ->
 }
 
 #[tauri::command]
+pub fn update_snippet(state: State<'_, AppState>, snippet_id: SnippetId, name: String, command: String) -> Result<Workspace, String> {
+    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    if let Some(snippet) = workspace.snippets.iter_mut().find(|s| s.id == snippet_id) {
+        snippet.name = name;
+        snippet.command = command;
+    }
+    persist(&workspace)?;
+    Ok(workspace.clone())
+}
+
+#[tauri::command]
 pub fn delete_snippet(state: State<'_, AppState>, snippet_id: SnippetId) -> Result<Workspace, String> {
     let mut workspace = state.workspace.lock().expect("lock poisoned");
     workspace.snippets.retain(|s| s.id != snippet_id);

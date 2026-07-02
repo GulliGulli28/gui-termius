@@ -27,6 +27,7 @@ export const api = {
   deleteGroup: (groupId: GroupId) => invoke<Workspace>("delete_group", { groupId }),
 
   addSnippet: (name: string, command: string) => invoke<Workspace>("add_snippet", { name, command }),
+  updateSnippet: (snippetId: SnippetId, name: string, command: string) => invoke<Workspace>("update_snippet", { snippetId, name, command }),
   deleteSnippet: (snippetId: SnippetId) => invoke<Workspace>("delete_snippet", { snippetId }),
 
   addForward: (input: { hostId: HostId; kind: PortForwardKind; bindAddress: string; bindPort: number; destAddress: string; destPort: number }) =>

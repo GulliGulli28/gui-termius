@@ -31,6 +31,7 @@ fn main() {
             commands::hosts::save_group,
             commands::hosts::delete_group,
             commands::hosts::add_snippet,
+            commands::hosts::update_snippet,
             commands::hosts::delete_snippet,
             commands::hosts::add_forward,
             commands::hosts::delete_forward,

@@ -12,13 +12,16 @@ pub fn list(path: &str) -> anyhow::Result<Vec<Entry>> {
     for item in std::fs::read_dir(path)? {
         let item = item?;
         let metadata = item.metadata()?;
+        let modified = metadata.modified().ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
         entries.push(Entry {
             name: item.file_name().to_string_lossy().to_string(),
             is_dir: metadata.is_dir(),
             is_symlink: metadata.is_symlink(),
             size: metadata.len(),
+            modified,
         });
     }
-    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
     Ok(entries)
 }

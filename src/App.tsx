@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "./lib/api";
+import { api, bytesToBase64 } from "./lib/api";
 import type { GroupId, Host, HostId, Workspace } from "./lib/types";
 import { Sidebar, type SidebarPanelKind } from "./components/Sidebar";
 import { HostForm } from "./components/HostForm";
@@ -167,7 +167,14 @@ export default function App() {
     if (!activeTabId) { setStatus("Aucun terminal actif pour exécuter ce snippet"); return; }
     const handle = terminalRefs.current.get(activeTabId);
     if (!handle) { setStatus("L'onglet actif n'est pas un terminal"); return; }
-    handle.runCommand(command);
+    if (command.includes("\n")) {
+      // Encode script as base64 and decode+execute in one line so the terminal
+      // only shows a compact command, not the full script content.
+      const b64 = bytesToBase64(new TextEncoder().encode(command));
+      handle.runCommand(`echo '${b64}' | base64 -d | bash`);
+    } else {
+      handle.runCommand(command);
+    }
   }, [activeTabId]);
 
   if (!workspace) {
@@ -230,6 +237,7 @@ export default function App() {
             onEditGroup={(group) => { setEditingGroup({ id: group.id, name: group.name, parentId: group.parentId ?? null, icon: group.icon ?? null }); setEditingHost(null); }}
             onWorkspaceUpdate={refreshWorkspace}
             onAddSnippet={(name, command) => api.addSnippet(name, command).then(refreshWorkspace).catch((e) => setStatus(String(e)))}
+            onUpdateSnippet={(id, name, command) => api.updateSnippet(id, name, command).then(refreshWorkspace).catch((e) => setStatus(String(e)))}
             onDeleteSnippet={(id) => api.deleteSnippet(id).then(refreshWorkspace).catch((e) => setStatus(String(e)))}
             onRunSnippet={runSnippetOnActiveTerminal}
             onAddForward={(input) => api.addForward(input).then(refreshWorkspace).catch((e) => setStatus(String(e)))}

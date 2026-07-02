@@ -80,6 +80,7 @@ export interface Entry {
   isDir: boolean;
   isSymlink: boolean;
   size: number;
+  modified?: number;
 }
 
 export type PaneSource = { kind: "local" } | { kind: "remote"; hostId: HostId };

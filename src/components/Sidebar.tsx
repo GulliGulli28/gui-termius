@@ -26,6 +26,7 @@ interface SidebarProps {
   onNewGroupUnder: (parentId: GroupId) => void;
   onEditGroup: (group: Group) => void;
   onAddSnippet: (name: string, command: string) => void;
+  onUpdateSnippet: (id: SnippetId, name: string, command: string) => void;
   onDeleteSnippet: (id: SnippetId) => void;
   onRunSnippet: (command: string) => void;
   onAddForward: (input: { hostId: HostId; kind: "local" | "remote"; bindAddress: string; bindPort: number; destAddress: string; destPort: number }) => void;
@@ -110,7 +111,7 @@ export function Sidebar(props: SidebarProps) {
           />
         )}
         {panel === "snippets" && (
-          <SnippetsPanel workspace={workspace} onAddSnippet={props.onAddSnippet} onDeleteSnippet={props.onDeleteSnippet} onRunSnippet={props.onRunSnippet} />
+          <SnippetsPanel workspace={workspace} onAddSnippet={props.onAddSnippet} onUpdateSnippet={props.onUpdateSnippet} onDeleteSnippet={props.onDeleteSnippet} onRunSnippet={props.onRunSnippet} />
         )}
         {panel === "tunnels" && (
           <TunnelsPanel workspace={workspace} onAddForward={props.onAddForward} onDeleteForward={props.onDeleteForward} onError={props.onError} />
