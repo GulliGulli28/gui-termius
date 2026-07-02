@@ -1,0 +1,330 @@
+import { useState } from "react";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { api } from "../lib/api";
+import type { Group, GroupId, Host, HostId, Workspace } from "../lib/types";
+import { HostIcon } from "./icons";
+import {
+  IconHosts, IconSearch, IconPlus, IconKeyboard, IconFlash,
+  IconFolder, IconChevronDown, IconChevronRight,
+  IconDotsVertical, IconEdit,
+  IconTransfer, IconUpload, IconDownload,
+} from "./ui-icons";
+
+interface HostsPanelProps {
+  workspace: Workspace;
+  onConnect: (host: Host) => void;
+  onOpenTransfer: (host: Host) => void;
+  onOpenLocalTerminal: () => void;
+  onNewHost: () => void;
+  onEditHost: (host: Host) => void;
+  onNewGroup: () => void;
+  onNewHostInGroup: (groupId: GroupId) => void;
+  onNewGroupUnder: (parentId: GroupId) => void;
+  onEditGroup: (group: Group) => void;
+  onQuickSSH: (cmd: string) => void;
+  onWorkspaceUpdate?: (ws: Workspace) => void;
+  onError?: (msg: string) => void;
+}
+
+function parseSSHInput(raw: string): { username: string; address: string; port: number } | null {
+  const str = raw.trim().replace(/^ssh\s+/, "");
+  const m = str.match(/^([^@\s]+)@([^:\s]+)(?::(\d+))?$/);
+  if (!m) return null;
+  const port = m[3] ? parseInt(m[3], 10) : 22;
+  if (!port || port < 1 || port > 65535) return null;
+  return { username: m[1], address: m[2], port };
+}
+
+export function HostsPanel({
+  workspace, onConnect, onOpenTransfer, onOpenLocalTerminal,
+  onNewHost, onEditHost, onNewGroup, onNewHostInGroup, onNewGroupUnder,
+  onEditGroup, onQuickSSH, onWorkspaceUpdate, onError,
+}: HostsPanelProps) {
+  const [search, setSearch] = useState("");
+  const [collapsed, setCollapsed] = useState<Set<GroupId>>(new Set());
+  const [openMenuHostId, setOpenMenuHostId] = useState<HostId | null>(null);
+  const [showAddMenu, setShowAddMenu] = useState(false);
+
+  const quickSSH = parseSSHInput(search);
+
+  const handleQuickConnect = () => {
+    if (!quickSSH) return;
+    const { username, address, port } = quickSSH;
+    const cmd = port === 22 ? `ssh ${username}@${address}` : `ssh -p ${port} ${username}@${address}`;
+    onQuickSSH(cmd);
+    setSearch("");
+  };
+
+  const query = search.trim().toLowerCase();
+  const matches = (host: Host) =>
+    !query || host.label.toLowerCase().includes(query) || host.address.toLowerCase().includes(query) ||
+    host.username.toLowerCase().includes(query) || host.tags.some((t) => t.toLowerCase().includes(query));
+
+  const childGroups = (parentId: GroupId | null) =>
+    workspace.groups.filter((g) => g.parentId === parentId).sort((a, b) => a.name.localeCompare(b.name));
+  const hostsIn = (groupId: GroupId | null) =>
+    workspace.hosts.filter((h) => h.groupId === groupId && matches(h)).sort((a, b) => a.label.localeCompare(b.label));
+  const isExpanded = (id: GroupId) => (query ? true : !collapsed.has(id));
+
+  function groupHasMatches(groupId: GroupId): boolean {
+    if (hostsIn(groupId).length > 0) return true;
+    return childGroups(groupId).some((g) => groupHasMatches(g.id));
+  }
+
+  const toggleGroup = (id: GroupId) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const fileFilters = [{ name: "JSON", extensions: ["json"] }];
+
+  const handleExportHost = async (host: Host) => {
+    try {
+      const safeName = host.label.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const path = await save({ title: "Exporter l'hôte", defaultPath: `${safeName}.json`, filters: fileFilters });
+      if (path) await api.exportHost(host.id, path);
+    } catch (e) { onError?.(String(e)); }
+  };
+
+  const handleImportHost = async () => {
+    try {
+      const path = await open({ title: "Importer un hôte", multiple: false, filters: fileFilters });
+      if (path && typeof path === "string") {
+        const ws = await api.importHostFromFile(path);
+        onWorkspaceUpdate?.(ws);
+      }
+    } catch (e) { onError?.(String(e)); }
+  };
+
+  // ── Host card ────────────────────────────────────────────────────────────
+  const renderHost = (host: Host, depth: number) => {
+    const menuOpen = openMenuHostId === host.id;
+    return (
+      <div
+        key={host.id}
+        style={{ marginLeft: depth * 14 }}
+        className={`group rounded-lg border transition-colors ${
+          menuOpen
+            ? "border-[var(--c-accent-dim)] bg-[var(--c-bg3)]"
+            : "border-[var(--c-border)] bg-[var(--c-bg3)]/40 hover:border-[var(--c-accent-dim)] hover:bg-[var(--c-bg3)]"
+        }`}
+      >
+        {/* Header row */}
+        <div className="flex items-stretch">
+          {/* Connect zone */}
+          <button
+            onClick={() => onConnect(host)}
+            className="flex min-w-0 flex-1 items-center gap-2.5 p-2.5 text-left"
+            title={`Connecter — ${host.username}@${host.address}:${host.port}`}
+          >
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--c-accent-dim)]">
+              {host.icon
+                ? <HostIcon iconId={host.icon} customIcons={workspace.customIcons} size={18} />
+                : <IconHosts size={14} className="text-[var(--c-accent-text)]" />
+              }
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-medium text-slate-100">{host.label}</div>
+              <div className="truncate text-[11px] text-slate-500">
+                {host.username}@{host.address}{host.port !== 22 ? `:${host.port}` : ""}
+              </div>
+            </div>
+          </button>
+          {/* Menu toggle */}
+          <button
+            onClick={(e) => { e.stopPropagation(); setOpenMenuHostId(menuOpen ? null : host.id); }}
+            className={`flex shrink-0 items-center px-2 transition-all ${
+              menuOpen
+                ? "text-slate-200"
+                : "text-slate-500 opacity-0 group-hover:opacity-100 hover:text-slate-200"
+            }`}
+            title="Options"
+          >
+            <IconDotsVertical size={14} />
+          </button>
+        </div>
+
+        {/* Tags */}
+        {host.tags.length > 0 && (
+          <div className="flex flex-wrap gap-1 px-2.5 pb-2">
+            {host.tags.map((tag) => (
+              <span key={tag} className="rounded-full bg-slate-700/60 px-1.5 py-0.5 text-[10px] text-slate-400">
+                {tag}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Expanded actions */}
+        {menuOpen && (
+          <div className="grid grid-cols-3 gap-1 border-t border-[var(--c-border)] p-2">
+            <button
+              onClick={() => { onOpenTransfer(host); setOpenMenuHostId(null); }}
+              className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-700/60"
+            >
+              <IconTransfer size={12} /> Transfert
+            </button>
+            <button
+              onClick={() => { onEditHost(host); setOpenMenuHostId(null); }}
+              className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-700/60"
+            >
+              <IconEdit size={12} /> Éditer
+            </button>
+            <button
+              onClick={() => { handleExportHost(host); setOpenMenuHostId(null); }}
+              className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-700/60"
+            >
+              <IconUpload size={12} /> Exporter
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ── Group row ────────────────────────────────────────────────────────────
+  const renderGroup = (group: Group, depth: number) => {
+    if (query && !groupHasMatches(group.id)) return null;
+    const expanded = isExpanded(group.id);
+    return (
+      <div key={group.id} className="space-y-1">
+        <div
+          style={{ marginLeft: depth * 14 }}
+          className="group flex items-center gap-0.5 rounded-md px-1 py-1 hover:bg-slate-800/60"
+        >
+          <button onClick={() => toggleGroup(group.id)} className="flex w-4 shrink-0 items-center justify-center text-slate-500">
+            {expanded ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+          </button>
+          <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm font-medium text-slate-300">
+            {group.icon ? (
+              <HostIcon iconId={group.icon} customIcons={workspace.customIcons} size={16} />
+            ) : (
+              <IconFolder size={14} className="text-slate-500" />
+            )}
+            {group.name}
+          </span>
+          <button
+            onClick={() => onNewHostInGroup(group.id)}
+            title="Nouvel hôte dans ce dossier"
+            className="flex items-center p-1 text-slate-500 opacity-0 hover:text-[var(--c-accent-text)] group-hover:opacity-100"
+          >
+            <IconHosts size={12} />
+          </button>
+          <button
+            onClick={() => onNewGroupUnder(group.id)}
+            title="Nouveau sous-dossier"
+            className="flex items-center p-1 text-slate-500 opacity-0 hover:text-[var(--c-accent-text)] group-hover:opacity-100"
+          >
+            <IconFolder size={12} />
+          </button>
+          <button
+            onClick={() => onEditGroup(group)}
+            title="Modifier ce dossier"
+            className="flex items-center p-1 text-slate-500 opacity-0 hover:text-slate-200 group-hover:opacity-100"
+          >
+            <IconEdit size={12} />
+          </button>
+        </div>
+        {expanded && (
+          <div className="space-y-1">
+            {hostsIn(group.id).map((h) => renderHost(h, depth + 1))}
+            {childGroups(group.id).map((g) => renderGroup(g, depth + 1))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="flex h-full flex-col gap-2">
+      {/* Search — first for discoverability */}
+      <div className="relative">
+        <div className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center">
+          <IconSearch size={13} className="text-slate-500" />
+        </div>
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && quickSSH) handleQuickConnect(); }}
+          placeholder="Rechercher ou ssh user@hôte…"
+          className="w-full rounded-md bg-[var(--c-bg3)] pl-8 pr-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-[var(--c-accent)]"
+        />
+      </div>
+
+      {/* Action buttons */}
+      <div className="flex gap-1.5">
+        <div className="relative flex-1">
+          {showAddMenu && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setShowAddMenu(false)} />
+              <div className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded-lg border border-slate-700 bg-[var(--c-bg2)] py-1 shadow-xl">
+                <button
+                  onClick={() => { onNewHost(); setShowAddMenu(false); }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-sm text-slate-200 hover:bg-[var(--c-bg3)]"
+                >
+                  <IconPlus size={14} /> Nouvel hôte
+                </button>
+                <button
+                  onClick={() => { onNewGroup(); setShowAddMenu(false); }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-sm text-slate-200 hover:bg-[var(--c-bg3)]"
+                >
+                  <IconFolder size={14} /> Nouveau dossier
+                </button>
+                <div className="my-1 border-t border-[var(--c-border)]" />
+                <button
+                  onClick={() => { handleImportHost(); setShowAddMenu(false); }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-sm text-slate-200 hover:bg-[var(--c-bg3)]"
+                >
+                  <IconDownload size={14} /> Importer un hôte
+                </button>
+              </div>
+            </>
+          )}
+          <button
+            onClick={() => setShowAddMenu((v) => !v)}
+            className={`flex w-full items-center justify-center gap-1.5 rounded-md border py-1.5 text-xs font-medium transition-colors ${
+              showAddMenu
+                ? "border-[var(--c-accent)] bg-[var(--c-accent-dim)] text-[var(--c-accent-text)]"
+                : "border-dashed border-slate-700 text-slate-400 hover:border-[var(--c-accent)] hover:text-[var(--c-accent-text)]"
+            }`}
+          >
+            <IconPlus size={13} />
+            Ajouter…
+          </button>
+        </div>
+        <button
+          onClick={onOpenLocalTerminal}
+          title="Ouvrir un terminal local"
+          className="flex shrink-0 items-center justify-center rounded-md border border-dashed border-slate-700 px-3 py-1.5 text-slate-400 hover:border-[var(--c-accent)] hover:text-[var(--c-accent-text)]"
+        >
+          <IconKeyboard size={15} />
+        </button>
+      </div>
+
+      {/* Host list */}
+      <div className="flex-1 space-y-1 overflow-y-auto">
+        {quickSSH && (
+          <button
+            onClick={handleQuickConnect}
+            className="flex w-full items-center gap-2 rounded-lg border border-[var(--c-accent-dim)] bg-[var(--c-accent-dim)] px-3 py-2 text-left text-sm text-[var(--c-accent-text)] hover:bg-[var(--c-accent)] hover:text-white"
+          >
+            <IconFlash size={13} className="shrink-0" />
+            <span className="min-w-0 truncate">
+              <span className="font-medium">{quickSSH.username}@{quickSSH.address}</span>
+              {quickSSH.port !== 22 && <span className="opacity-70">:{quickSSH.port}</span>}
+            </span>
+            <span className="ml-auto shrink-0 text-[10px] opacity-60">Entrée pour se connecter</span>
+          </button>
+        )}
+        {hostsIn(null).map((h) => renderHost(h, 0))}
+        {childGroups(null).map((g) => renderGroup(g, 0))}
+        {!quickSSH && workspace.hosts.length === 0 && workspace.groups.length === 0 && (
+          <p className="px-1 py-4 text-center text-sm text-slate-500">Aucun hôte enregistré</p>
+        )}
+      </div>
+    </div>
+  );
+}

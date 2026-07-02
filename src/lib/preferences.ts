@@ -1,0 +1,209 @@
+import type { ITheme } from "@xterm/xterm";
+
+export type UiAccent = "indigo" | "blue" | "violet" | "emerald" | "rose" | "teal" | "amber" | "cyan";
+
+export interface AccentColorEntry {
+  label: string;
+  c600: string;
+  c500: string;
+  c300: string;
+  dim: string;
+}
+
+export const ACCENT_COLORS: Record<UiAccent, AccentColorEntry> = {
+  indigo:  { label: "Indigo",   c600: "#4f46e5", c500: "#6366f1", c300: "#a5b4fc", dim: "rgba(79,70,229,0.18)"  },
+  blue:    { label: "Bleu",     c600: "#2563eb", c500: "#3b82f6", c300: "#93c5fd", dim: "rgba(37,99,235,0.18)"  },
+  violet:  { label: "Violet",   c600: "#7c3aed", c500: "#8b5cf6", c300: "#c4b5fd", dim: "rgba(124,58,237,0.18)" },
+  emerald: { label: "Émeraude", c600: "#059669", c500: "#10b981", c300: "#6ee7b7", dim: "rgba(5,150,105,0.18)"  },
+  rose:    { label: "Rose",     c600: "#e11d48", c500: "#f43f5e", c300: "#fda4af", dim: "rgba(225,29,72,0.18)"  },
+  teal:    { label: "Teal",     c600: "#0d9488", c500: "#14b8a6", c300: "#5eead4", dim: "rgba(13,148,136,0.18)" },
+  amber:   { label: "Ambre",    c600: "#d97706", c500: "#f59e0b", c300: "#fcd34d", dim: "rgba(217,119,6,0.18)"  },
+  cyan:    { label: "Cyan",     c600: "#0891b2", c500: "#06b6d4", c300: "#67e8f9", dim: "rgba(8,145,178,0.18)"  },
+};
+
+export type UiBg = "slate" | "gray" | "zinc" | "black" | "navy";
+
+export interface BgThemeEntry {
+  label: string;
+  bg: string;
+  bg2: string;
+  bg3: string;
+  border: string;
+}
+
+export const BG_THEMES: Record<UiBg, BgThemeEntry> = {
+  slate: { label: "Ardoise",   bg: "#020617", bg2: "#0f172a", bg3: "#1e293b", border: "#1e293b" },
+  gray:  { label: "Gris",     bg: "#030712", bg2: "#111827", bg3: "#1f2937", border: "#1f2937" },
+  zinc:  { label: "Zinc",     bg: "#09090b", bg2: "#18181b", bg3: "#27272a", border: "#27272a" },
+  black: { label: "Noir pur", bg: "#000000", bg2: "#0d0d0d", bg3: "#1a1a1a", border: "#262626" },
+  navy:  { label: "Marine",   bg: "#020c1b", bg2: "#0d1b2e", bg3: "#1a3148", border: "#1e3a52" },
+};
+
+export interface AppPreferences {
+  terminalThemeName: string;
+  terminalFontFamily: string;
+  terminalFontSize: number;
+  uiAccent: UiAccent;
+  uiBg: UiBg;
+}
+
+export interface TerminalThemeEntry {
+  label: string;
+  theme: ITheme;
+}
+
+export const TERMINAL_THEMES: Record<string, TerminalThemeEntry> = {
+  dark: {
+    label: "Dark (par défaut)",
+    theme: {
+      background: "#020617", foreground: "#e2e8f0", cursor: "#a5b4fc",
+      selectionBackground: "#1e293b",
+      black: "#0f172a", brightBlack: "#334155",
+      red: "#ef4444", brightRed: "#f87171",
+      green: "#22c55e", brightGreen: "#4ade80",
+      yellow: "#eab308", brightYellow: "#facc15",
+      blue: "#3b82f6", brightBlue: "#60a5fa",
+      magenta: "#a855f7", brightMagenta: "#c084fc",
+      cyan: "#06b6d4", brightCyan: "#22d3ee",
+      white: "#e2e8f0", brightWhite: "#f8fafc",
+    },
+  },
+  dracula: {
+    label: "Dracula",
+    theme: {
+      background: "#282a36", foreground: "#f8f8f2", cursor: "#f8f8f2",
+      selectionBackground: "#44475a",
+      black: "#21222c", brightBlack: "#6272a4",
+      red: "#ff5555", brightRed: "#ff6e6e",
+      green: "#50fa7b", brightGreen: "#69ff94",
+      yellow: "#f1fa8c", brightYellow: "#ffffa5",
+      blue: "#bd93f9", brightBlue: "#d6acff",
+      magenta: "#ff79c6", brightMagenta: "#ff92df",
+      cyan: "#8be9fd", brightCyan: "#a4ffff",
+      white: "#f8f8f2", brightWhite: "#ffffff",
+    },
+  },
+  "solarized-dark": {
+    label: "Solarized Dark",
+    theme: {
+      background: "#002b36", foreground: "#839496", cursor: "#839496",
+      selectionBackground: "#073642",
+      black: "#073642", brightBlack: "#586e75",
+      red: "#dc322f", brightRed: "#cb4b16",
+      green: "#859900", brightGreen: "#859900",
+      yellow: "#b58900", brightYellow: "#657b83",
+      blue: "#268bd2", brightBlue: "#839496",
+      magenta: "#d33682", brightMagenta: "#6c71c4",
+      cyan: "#2aa198", brightCyan: "#93a1a1",
+      white: "#eee8d5", brightWhite: "#fdf6e3",
+    },
+  },
+  monokai: {
+    label: "Monokai",
+    theme: {
+      background: "#272822", foreground: "#f8f8f2", cursor: "#f8f8f0",
+      selectionBackground: "#49483e",
+      black: "#272822", brightBlack: "#75715e",
+      red: "#f92672", brightRed: "#f92672",
+      green: "#a6e22e", brightGreen: "#a6e22e",
+      yellow: "#f4bf75", brightYellow: "#f4bf75",
+      blue: "#66d9e8", brightBlue: "#66d9e8",
+      magenta: "#ae81ff", brightMagenta: "#ae81ff",
+      cyan: "#a1efe4", brightCyan: "#a1efe4",
+      white: "#f8f8f2", brightWhite: "#f9f8f5",
+    },
+  },
+  "one-dark": {
+    label: "One Dark",
+    theme: {
+      background: "#282c34", foreground: "#abb2bf", cursor: "#528bff",
+      selectionBackground: "#3e4451",
+      black: "#282c34", brightBlack: "#545862",
+      red: "#e06c75", brightRed: "#e06c75",
+      green: "#98c379", brightGreen: "#98c379",
+      yellow: "#e5c07b", brightYellow: "#e5c07b",
+      blue: "#61afef", brightBlue: "#61afef",
+      magenta: "#c678dd", brightMagenta: "#c678dd",
+      cyan: "#56b6c2", brightCyan: "#56b6c2",
+      white: "#abb2bf", brightWhite: "#ffffff",
+    },
+  },
+  nord: {
+    label: "Nord",
+    theme: {
+      background: "#2e3440", foreground: "#d8dee9", cursor: "#d8dee9",
+      selectionBackground: "#434c5e",
+      black: "#3b4252", brightBlack: "#4c566a",
+      red: "#bf616a", brightRed: "#bf616a",
+      green: "#a3be8c", brightGreen: "#a3be8c",
+      yellow: "#ebcb8b", brightYellow: "#ebcb8b",
+      blue: "#81a1c1", brightBlue: "#81a1c1",
+      magenta: "#b48ead", brightMagenta: "#b48ead",
+      cyan: "#88c0d0", brightCyan: "#8fbcbb",
+      white: "#e5e9f0", brightWhite: "#eceff4",
+    },
+  },
+  gruvbox: {
+    label: "Gruvbox Dark",
+    theme: {
+      background: "#282828", foreground: "#ebdbb2", cursor: "#ebdbb2",
+      selectionBackground: "#3c3836",
+      black: "#282828", brightBlack: "#928374",
+      red: "#cc241d", brightRed: "#fb4934",
+      green: "#98971a", brightGreen: "#b8bb26",
+      yellow: "#d79921", brightYellow: "#fabd2f",
+      blue: "#458588", brightBlue: "#83a598",
+      magenta: "#b16286", brightMagenta: "#d3869b",
+      cyan: "#689d6a", brightCyan: "#8ec07c",
+      white: "#a89984", brightWhite: "#ebdbb2",
+    },
+  },
+  "ayu-dark": {
+    label: "Ayu Dark",
+    theme: {
+      background: "#0a0e14", foreground: "#b3b1ad", cursor: "#e6b450",
+      selectionBackground: "#253340",
+      black: "#01060e", brightBlack: "#545f6e",
+      red: "#ea6c73", brightRed: "#f28779",
+      green: "#91b362", brightGreen: "#c2d94c",
+      yellow: "#f9af4f", brightYellow: "#ffb454",
+      blue: "#53bdfa", brightBlue: "#59c2ff",
+      magenta: "#fae994", brightMagenta: "#ffee99",
+      cyan: "#90e1c6", brightCyan: "#95e6cb",
+      white: "#c7c7c7", brightWhite: "#ffffff",
+    },
+  },
+};
+
+export const FONT_FAMILIES: { value: string; label: string }[] = [
+  { value: "ui-monospace, SFMono-Regular, Menlo, monospace", label: "Monospace (système)" },
+  { value: "Consolas, monospace", label: "Consolas" },
+  { value: "\"JetBrains Mono\", monospace", label: "JetBrains Mono" },
+  { value: "\"Fira Code\", monospace", label: "Fira Code" },
+  { value: "\"Cascadia Code\", monospace", label: "Cascadia Code" },
+  { value: "\"Source Code Pro\", monospace", label: "Source Code Pro" },
+  { value: "\"Ubuntu Mono\", monospace", label: "Ubuntu Mono" },
+  { value: "\"Courier New\", monospace", label: "Courier New" },
+];
+
+export const DEFAULT_PREFERENCES: AppPreferences = {
+  terminalThemeName: "dark",
+  terminalFontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+  terminalFontSize: 14,
+  uiAccent: "indigo",
+  uiBg: "slate",
+};
+
+const STORAGE_KEY = "gui-termius-prefs";
+
+export function loadPreferences(): AppPreferences {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return { ...DEFAULT_PREFERENCES, ...JSON.parse(raw) };
+  } catch { /* ignore */ }
+  return { ...DEFAULT_PREFERENCES };
+}
+
+export function savePreferences(prefs: AppPreferences): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+}
