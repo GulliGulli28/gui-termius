@@ -86,6 +86,18 @@ pub struct Host {
     pub env_vars: Vec<EnvVar>,
     #[serde(default)]
     pub icon: Option<String>,
+    /// SSH keepalive interval in seconds (`None` or `0` disables it). Sent as
+    /// `keepalive@openssh.com` channel requests by the underlying `russh` client
+    /// to keep idle connections (e.g. behind NAT/firewalls) from being dropped.
+    #[serde(default)]
+    pub keepalive_interval_secs: Option<u32>,
+    /// Forwards the local SSH agent to this host so it can, in turn, authenticate
+    /// onward (e.g. to a Git server or another bastion) using local keys, without
+    /// those keys ever leaving the client. Security-sensitive: only enable for
+    /// hosts you trust, since a compromised remote could abuse the forwarded
+    /// agent for as long as the session is open. Unix-only, requires `auth: Agent`.
+    #[serde(default)]
+    pub agent_forward: bool,
 }
 
 impl Host {
@@ -103,6 +115,8 @@ impl Host {
             startup_snippets: Vec::new(),
             env_vars: Vec::new(),
             icon: None,
+            keepalive_interval_secs: None,
+            agent_forward: false,
         }
     }
 }

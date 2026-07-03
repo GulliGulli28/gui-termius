@@ -41,6 +41,7 @@ fn main() {
             commands::hosts::add_custom_icon,
             commands::hosts::delete_custom_icon,
             commands::hosts::read_icon_file,
+            commands::hosts::check_host_status,
             commands::export::export_workspace,
             commands::export::import_workspace,
             commands::export::export_host,
@@ -57,9 +58,19 @@ fn main() {
             commands::sftp::close_pane,
             commands::sftp::list_pane,
             commands::sftp::copy_entry,
+            commands::sftp::pane_mkdir,
+            commands::sftp::pane_rename,
+            commands::sftp::pane_remove,
+            commands::sftp::pane_chmod,
+            commands::sftp::upload_paths,
+            commands::sftp::cancel_transfer,
             commands::forward::start_forward,
             commands::forward::stop_forward,
             commands::forward::running_forwards,
+            commands::known_hosts::list_known_hosts,
+            commands::known_hosts::revoke_known_host,
+            commands::known_hosts::preview_ssh_config_import,
+            commands::known_hosts::import_ssh_config_hosts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

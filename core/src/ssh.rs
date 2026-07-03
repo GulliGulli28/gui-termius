@@ -14,6 +14,7 @@ use russh::keys::{PrivateKeyWithHashAlg, decode_secret_key, load_secret_key};
 use russh::{Channel, ChannelMsg, Disconnect};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Where a remote-forwarded connection for `(bind_address, bind_port)` should
@@ -78,6 +79,25 @@ impl client::Handler for AppHandler {
             let mut local = local;
             let mut remote = channel.into_stream();
             let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+        });
+        Ok(())
+    }
+
+    /// Bridges an agent-forwarding channel the server opened back to our local
+    /// ssh-agent (`SSH_AUTH_SOCK`), so the remote host can use locally-held keys
+    /// without them ever leaving this machine. Only requested in the first place
+    /// when the connecting host has `agent_forward` enabled (see [`open_shell`]).
+    #[cfg(unix)]
+    async fn server_channel_open_agent_forward(&mut self, channel: Channel<client::Msg>, _session: &mut client::Session) -> Result<(), Self::Error> {
+        let Ok(sock_path) = std::env::var("SSH_AUTH_SOCK") else {
+            return Ok(());
+        };
+        tokio::spawn(async move {
+            let Ok(mut agent) = tokio::net::UnixStream::connect(&sock_path).await else {
+                return;
+            };
+            let mut remote = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(&mut agent, &mut remote).await;
         });
         Ok(())
     }
@@ -204,7 +224,15 @@ fn ensure_success(result: AuthResult, host_label: &str) -> anyhow::Result<()> {
 /// Connects to `target`, transparently chaining through its bastion hosts (if any).
 pub async fn connect(workspace: &Workspace, target: HostId) -> anyhow::Result<Connection> {
     let chain = workspace.jump_chain(target)?;
-    let config = Arc::new(client::Config::default());
+
+    // Keepalive is configured off the *target* host only — bastions just relay bytes,
+    // so what matters for keeping the interactive session alive is the last hop.
+    let mut config = client::Config::default();
+    if let Some(secs) = chain.last().expect("chain is never empty").keepalive_interval_secs.filter(|&s| s > 0) {
+        config.keepalive_interval = Some(Duration::from_secs(secs as u64));
+    }
+    let config = Arc::new(config);
+
     let remote_forward_routes: RemoteForwardRoutes = Arc::new(Mutex::new(HashMap::new()));
 
     let first = chain[0];
@@ -248,9 +276,15 @@ pub struct ShellSession {
     pub output: mpsc::Receiver<Vec<u8>>,
 }
 
-/// Opens an interactive PTY + shell on `connection`'s target host.
-pub async fn open_shell(connection: &Connection, cols: u16, rows: u16) -> anyhow::Result<ShellSession> {
+/// Opens an interactive PTY + shell on `connection`'s target host. When `agent_forward`
+/// is set, requests agent forwarding on the channel first — the actual bridging back to
+/// `SSH_AUTH_SOCK` happens in [`AppHandler::server_channel_open_agent_forward`] once the
+/// server opens its side of the forwarding channel.
+pub async fn open_shell(connection: &Connection, cols: u16, rows: u16, agent_forward: bool) -> anyhow::Result<ShellSession> {
     let channel = connection.target().channel_open_session().await?;
+    if agent_forward {
+        channel.agent_forward(false).await?;
+    }
     channel
         .request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
         .await?;
@@ -295,4 +329,14 @@ pub async fn open_shell(connection: &Connection, cols: u16, rows: u16) -> anyhow
     });
 
     Ok(ShellSession { input: input_tx, output: output_rx })
+}
+
+/// Lightweight reachability check: a raw TCP connect attempt with a short timeout,
+/// no SSH handshake. Meant for a quick "online / offline" indicator, not a real
+/// connection test (auth or host-key issues won't show up here).
+pub async fn probe(host: &Host) -> bool {
+    tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect((host.address.as_str(), host.port)))
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false)
 }

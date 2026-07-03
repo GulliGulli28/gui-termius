@@ -54,3 +54,17 @@ pub fn check_and_trust(identity: &str, key: &PublicKey) -> anyhow::Result<Verdic
         },
     }
 }
+
+/// Lists every trusted `(identity, openssh-encoded public key)` pair, sorted by identity.
+pub fn list() -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = read().0.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
+/// Revokes trust for `identity` — the next connection to it will be treated as newly seen.
+pub fn remove(identity: &str) -> anyhow::Result<()> {
+    let mut store = read();
+    store.0.remove(identity);
+    write(&store)
+}

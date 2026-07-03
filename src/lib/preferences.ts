@@ -1,4 +1,5 @@
 import type { ITheme } from "@xterm/xterm";
+import { defaultShortcuts } from "./shortcuts";
 
 export type UiAccent = "indigo" | "blue" | "violet" | "emerald" | "rose" | "teal" | "amber" | "cyan";
 
@@ -43,8 +44,13 @@ export interface AppPreferences {
   terminalThemeName: string;
   terminalFontFamily: string;
   terminalFontSize: number;
+  sftpFontSize: number;
   uiAccent: UiAccent;
   uiBg: UiBg;
+  notifyOnDisconnect: boolean;
+  notifyOnTransferDone: boolean;
+  keyboardShortcuts: Record<string, string>;
+  restoreTabsOnLaunch: boolean;
 }
 
 export interface TerminalThemeEntry {
@@ -190,8 +196,13 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   terminalThemeName: "dark",
   terminalFontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
   terminalFontSize: 14,
+  sftpFontSize: 13,
   uiAccent: "indigo",
   uiBg: "slate",
+  notifyOnDisconnect: true,
+  notifyOnTransferDone: true,
+  keyboardShortcuts: defaultShortcuts(),
+  restoreTabsOnLaunch: true,
 };
 
 const STORAGE_KEY = "gui-termius-prefs";
@@ -199,7 +210,14 @@ const STORAGE_KEY = "gui-termius-prefs";
 export function loadPreferences(): AppPreferences {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return { ...DEFAULT_PREFERENCES, ...JSON.parse(raw) };
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        ...DEFAULT_PREFERENCES,
+        ...parsed,
+        keyboardShortcuts: { ...DEFAULT_PREFERENCES.keyboardShortcuts, ...(parsed.keyboardShortcuts ?? {}) },
+      };
+    }
   } catch { /* ignore */ }
   return { ...DEFAULT_PREFERENCES };
 }

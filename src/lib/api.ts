@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AuthMethod, EnvVar, Entry, GroupId, HostId, KeyId, PaneListed, PaneOpened, PaneSource, PortForwardId, PortForwardKind, SnippetId, Workspace } from "./types";
+import type { AuthMethod, EnvVar, Entry, GroupId, HostId, ImportSelection, KeyId, KnownHostEntry, PaneListed, PaneOpened, PaneSource, PortForwardId, PortForwardKind, SnippetId, SshConfigHost, TransferProgressEvent, Workspace } from "./types";
 
 export const api = {
   getWorkspace: () => invoke<Workspace>("get_workspace"),
@@ -19,9 +19,12 @@ export const api = {
     envVars: EnvVar[];
     icon: string | null;
     secret: string | null;
+    keepaliveIntervalSecs: number | null;
+    agentForward: boolean;
   }) => invoke<Workspace>("save_host", { input }),
 
   deleteHost: (hostId: HostId) => invoke<Workspace>("delete_host", { hostId }),
+  checkHostStatus: (hostId: HostId) => invoke<boolean>("check_host_status", { hostId }),
 
   saveGroup: (input: { id: GroupId | null; name: string; parentId: GroupId | null; icon: string | null }) => invoke<Workspace>("save_group", { input }),
   deleteGroup: (groupId: GroupId) => invoke<Workspace>("delete_group", { groupId }),
@@ -49,6 +52,11 @@ export const api = {
   stopForward: (forwardId: PortForwardId) => invoke<void>("stop_forward", { forwardId }),
   runningForwards: () => invoke<PortForwardId[]>("running_forwards"),
 
+  listKnownHosts: () => invoke<KnownHostEntry[]>("list_known_hosts"),
+  revokeKnownHost: (identity: string) => invoke<void>("revoke_known_host", { identity }),
+  previewSshConfigImport: (path: string | null) => invoke<SshConfigHost[]>("preview_ssh_config_import", { path }),
+  importSshConfigHosts: (selections: ImportSelection[]) => invoke<Workspace>("import_ssh_config_hosts", { selections }),
+
   connectTerminal: (hostId: HostId) => invoke<string>("connect_terminal", { hostId }),
   writeTerminal: (sessionId: string, data: string) => invoke<void>("write_terminal", { sessionId, data }),
   resizeTerminal: (sessionId: string, cols: number, rows: number) => invoke<void>("resize_terminal", { sessionId, cols, rows }),
@@ -64,7 +72,25 @@ export const api = {
   listPane: (paneId: string, path: string) => invoke<PaneListed>("list_pane", { paneId, path }),
   copyEntry: (sourcePaneId: string, sourceCwd: string, entry: Entry, destPaneId: string, destCwd: string) =>
     invoke<PaneListed>("copy_entry", { sourcePaneId, sourceCwd, entry, destPaneId, destCwd }),
+  paneMkdir: (paneId: string, cwd: string, name: string) => invoke<PaneListed>("pane_mkdir", { paneId, cwd, name }),
+  paneRename: (paneId: string, cwd: string, oldName: string, newName: string) => invoke<PaneListed>("pane_rename", { paneId, cwd, oldName, newName }),
+  paneRemove: (paneId: string, cwd: string, entry: Entry) => invoke<PaneListed>("pane_remove", { paneId, cwd, entry }),
+  paneChmod: (paneId: string, cwd: string, name: string, mode: number) => invoke<PaneListed>("pane_chmod", { paneId, cwd, name, mode }),
+  uploadPaths: (paneId: string, cwd: string, localPaths: string[]) => invoke<string[]>("upload_paths", { paneId, cwd, localPaths }),
+  cancelTransfer: (transferId: string) => invoke<void>("cancel_transfer", { transferId }),
 };
+
+export function onTransferProgress(handler: (e: TransferProgressEvent) => void): Promise<UnlistenFn> {
+  return listen<TransferProgressEvent>("transfer-progress", (event) => handler(event.payload));
+}
+
+export function onTransferDone(handler: (transferId: string) => void): Promise<UnlistenFn> {
+  return listen<{ transferId: string }>("transfer-done", (event) => handler(event.payload.transferId));
+}
+
+export function onTransferError(handler: (transferId: string, message: string) => void): Promise<UnlistenFn> {
+  return listen<{ transferId: string; message: string }>("transfer-error", (event) => handler(event.payload.transferId, event.payload.message));
+}
 
 export function onTerminalData(handler: (id: string, data: string) => void): Promise<UnlistenFn> {
   return listen<{ id: string; data: string }>("terminal-data", (event) => handler(event.payload.id, event.payload.data));

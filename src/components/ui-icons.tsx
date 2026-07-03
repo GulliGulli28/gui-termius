@@ -210,3 +210,33 @@ export function IconPlay({ size = 16, className }: P) {
     </svg>
   );
 }
+
+export function IconPalette({ size = 16, className }: P) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={className}>
+      <path d="M8 1.5c-3.6 0-6.5 2.75-6.5 6.15 0 2.55 2 3.85 3.6 3.85.75 0 .95-.4.95-.85s-.25-.65-.25-1.2c0-.55.45-1 1.05-1h1.6c2 0 3.55-1.4 3.55-3.5 0-2.4-1.9-3.45-4-3.45Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+      <circle cx="4.6" cy="7.4" r="0.75" fill="currentColor" />
+      <circle cx="6.4" cy="4.9" r="0.75" fill="currentColor" />
+      <circle cx="9.6" cy="4.9" r="0.75" fill="currentColor" />
+      <circle cx="11.2" cy="7.4" r="0.75" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function IconShield({ size = 16, className }: P) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={className}>
+      <path d="M8 1.5l5.5 2v4c0 3.5-2.3 5.9-5.5 7-3.2-1.1-5.5-3.5-5.5-7v-4L8 1.5Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+      <path d="M5.8 8l1.6 1.6 2.8-3.2" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function IconBell({ size = 16, className }: P) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={className}>
+      <path d="M8 2.5c-2 0-3.25 1.5-3.25 3.75v1.5c0 .9-.35 1.75-1 2.4l-.5.5h9.5l-.5-.5c-.65-.65-1-1.5-1-2.4v-1.5C11.25 4 10 2.5 8 2.5Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+      <path d="M6.5 12.5a1.5 1.5 0 0 0 3 0" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+    </svg>
+  );
+}

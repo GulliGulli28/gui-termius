@@ -49,79 +49,77 @@ export function KeychainPanel({ workspace, onAddKey, onDeleteKey, onRenameKey }:
   };
 
   return (
-    <div className="flex h-full flex-col gap-2">
-      {/* Add form at top */}
-      <div>
-        <button
-          onClick={() => setShowForm((v) => !v)}
-          className={`flex w-full items-center justify-center gap-1.5 rounded-md border py-1.5 text-xs font-medium transition-colors ${
-            showForm
-              ? "border-[var(--c-accent)] bg-[var(--c-accent-dim)] text-[var(--c-accent-text)]"
-              : "border-dashed border-slate-700 text-slate-400 hover:border-[var(--c-accent)] hover:text-[var(--c-accent-text)]"
-          }`}
-        >
-          <IconPlus size={13} /> Ajouter une clé
-        </button>
-        {showForm && (
-          <div className="mt-2 space-y-2 rounded-lg border border-[var(--c-border)] bg-[var(--c-bg3)]/40 p-2.5">
-            {error && <p className="rounded-md bg-rose-950 px-2 py-1 text-xs text-rose-300">{error}</p>}
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Nom (ex: ma-clé-perso)"
-              autoFocus
-              className={inputClass}
-            />
-            <div className="flex gap-1.5">
+    <div className="flex h-full min-w-0 flex-col">
+      <div className="sidebar-scroll min-h-0 min-w-0 flex-1 space-y-2 overflow-y-auto">
+        {/* Add form at top */}
+        <div>
+          <button
+            onClick={() => setShowForm((v) => !v)}
+            className={`flex w-full items-center justify-center gap-1.5 rounded-md border py-1.5 text-xs font-medium transition-colors ${
+              showForm
+                ? "border-[var(--c-accent)] bg-[var(--c-accent-dim)] text-[var(--c-accent-text)]"
+                : "border-dashed border-slate-700 text-slate-400 hover:border-[var(--c-accent)] hover:text-[var(--c-accent-text)]"
+            }`}
+          >
+            <IconPlus size={13} /> Ajouter une clé
+          </button>
+          {showForm && (
+            <div className="mt-2 space-y-2 rounded-lg border border-[var(--c-border)] bg-[var(--c-bg3)]/40 p-2.5">
+              {error && <p className="rounded-md bg-rose-950 px-2 py-1 text-xs text-rose-300">{error}</p>}
               <input
-                value={path}
-                onChange={(e) => setPath(e.target.value)}
-                placeholder="Chemin vers la clé privée"
-                className={`${inputClass} flex-1`}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Nom (ex: ma-clé-perso)"
+                autoFocus
+                className={inputClass}
               />
-              <button
-                onClick={browse}
-                className="flex shrink-0 items-center justify-center rounded-md bg-slate-700 px-2.5 py-1.5 text-slate-400 hover:bg-slate-600 hover:text-slate-200"
-                title="Parcourir le système de fichiers"
-              >
-                <IconFolder size={14} />
-              </button>
+              <div className="flex gap-1.5">
+                <input
+                  value={path}
+                  onChange={(e) => setPath(e.target.value)}
+                  placeholder="Chemin vers la clé privée"
+                  className={`${inputClass} min-w-0 flex-1`}
+                />
+                <button
+                  onClick={browse}
+                  className="flex shrink-0 items-center justify-center rounded-md bg-slate-700 px-2.5 py-1.5 text-slate-400 hover:bg-slate-600 hover:text-slate-200"
+                  title="Parcourir"
+                >
+                  <IconFolder size={14} />
+                </button>
+              </div>
+              <div className="flex gap-1.5">
+                <input
+                  value={passphrase}
+                  onChange={(e) => setPassphrase(e.target.value)}
+                  type={showPassphrase ? "text" : "password"}
+                  placeholder="Passphrase (optionnelle)"
+                  className={`${inputClass} min-w-0 flex-1`}
+                />
+                <button
+                  onClick={() => setShowPassphrase((v) => !v)}
+                  className="shrink-0 rounded-md bg-slate-700 px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-600"
+                >
+                  {showPassphrase ? "Cacher" : "Voir"}
+                </button>
+              </div>
+              <div className="flex gap-1.5">
+                <button
+                  onClick={submit}
+                  className="flex-1 rounded-md bg-[var(--c-accent)] py-1.5 text-xs font-medium text-white hover:bg-[var(--c-accent-hover)]"
+                >
+                  Enregistrer
+                </button>
+                <button
+                  onClick={() => { setShowForm(false); setError(null); setName(""); setPath(""); setPassphrase(""); }}
+                  className="flex items-center justify-center rounded-md bg-slate-700 px-2.5 py-1.5 text-slate-300 hover:bg-slate-600"
+                >
+                  <IconClose size={12} />
+                </button>
+              </div>
             </div>
-            <div className="flex gap-1.5">
-              <input
-                value={passphrase}
-                onChange={(e) => setPassphrase(e.target.value)}
-                type={showPassphrase ? "text" : "password"}
-                placeholder="Passphrase (optionnelle)"
-                className={`${inputClass} flex-1`}
-              />
-              <button
-                onClick={() => setShowPassphrase((v) => !v)}
-                className="shrink-0 rounded-md bg-slate-700 px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-600"
-              >
-                {showPassphrase ? "Cacher" : "Voir"}
-              </button>
-            </div>
-            <div className="flex gap-1.5">
-              <button
-                onClick={submit}
-                className="flex-1 rounded-md bg-[var(--c-accent)] py-1.5 text-xs font-medium text-white hover:bg-[var(--c-accent-hover)]"
-              >
-                Enregistrer la clé
-              </button>
-              <button
-                onClick={() => { setShowForm(false); setError(null); setName(""); setPath(""); setPassphrase(""); }}
-                className="flex items-center justify-center rounded-md bg-slate-700 px-2.5 py-1.5 text-slate-300 hover:bg-slate-600"
-              >
-                <IconClose size={12} />
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Key list */}
-      <div className="flex-1 space-y-1.5 overflow-y-auto">
+          )}
+        </div>
         {workspace.keychain.length === 0 && (
           <p className="px-1 py-4 text-center text-sm text-slate-500">Aucune clé enregistrée</p>
         )}

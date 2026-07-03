@@ -5,6 +5,7 @@ pub mod model;
 pub mod port_forward;
 pub mod sftp;
 pub mod ssh;
+pub mod ssh_config;
 pub mod store;
 pub mod transfer;
 pub mod vault;

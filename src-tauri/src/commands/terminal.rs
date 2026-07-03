@@ -46,8 +46,9 @@ pub async fn connect_terminal(app: AppHandle, state: State<'_, AppState>, host_i
         cmds
     };
 
+    let agent_forward = workspace.host(host_id).map(|h| h.agent_forward).unwrap_or(false);
     let connection = ssh::connect(&workspace, host_id).await.map_err(|e| e.to_string())?;
-    let shell = ssh::open_shell(&connection, 80, 24).await.map_err(|e| e.to_string())?;
+    let shell = ssh::open_shell(&connection, 80, 24, agent_forward).await.map_err(|e| e.to_string())?;
 
     let session_id = Uuid::new_v4().to_string();
     let ssh::ShellSession { input, mut output } = shell;

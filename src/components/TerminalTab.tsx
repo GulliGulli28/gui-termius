@@ -1,11 +1,13 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { api, base64ToBytes, bytesToBase64, onTerminalClosed, onTerminalData } from "../lib/api";
 import type { Host } from "../lib/types";
 import type { AppPreferences } from "../lib/preferences";
 import { TERMINAL_THEMES } from "../lib/preferences";
+import { TerminalSearchBar } from "./TerminalSearchBar";
 
 export interface TerminalTabHandle {
   runCommand: (command: string) => void;
@@ -23,9 +25,13 @@ export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(funct
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const [status, setStatus] = useState<"connecting" | "open" | "failed">("connecting");
   const [error, setError] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchOpenRef = useRef(searchOpen);
+  useEffect(() => { searchOpenRef.current = searchOpen; }, [searchOpen]);
 
   useImperativeHandle(
     ref,
@@ -55,10 +61,26 @@ export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(funct
       theme: { background: "#020617", foreground: "#e2e8f0" },
     });
     const fit = new FitAddon();
+    const search = new SearchAddon();
     term.loadAddon(fit);
+    term.loadAddon(search);
     if (containerRef.current) term.open(containerRef.current);
     termRef.current = term;
     fitRef.current = fit;
+    searchRef.current = search;
+
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown") return true;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        setSearchOpen(true);
+        return false;
+      }
+      if (e.key === "Escape" && searchOpenRef.current) {
+        setSearchOpen(false);
+        return false;
+      }
+      return true;
+    });
 
     term.onData((data) => {
       if (sessionIdRef.current) {
@@ -145,10 +167,17 @@ export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(funct
 
   const bgColor = preferences ? (TERMINAL_THEMES[preferences.terminalThemeName]?.theme.background ?? "#020617") : "#020617";
 
+  const handleSearch = (value: string, direction: "next" | "prev") => {
+    if (!value) return;
+    if (direction === "next") searchRef.current?.findNext(value, { incremental: true });
+    else searchRef.current?.findPrevious(value, { incremental: true });
+  };
+
   return (
     <div className="relative flex min-h-0 flex-1 flex-col p-2" style={{ backgroundColor: bgColor }}>
       {status === "connecting" && <div className="absolute inset-0 flex items-center justify-center text-slate-400">Connexion à {host.label}…</div>}
       {status === "failed" && <div className="absolute inset-0 flex items-center justify-center px-8 text-center text-rose-300">Échec de connexion : {error}</div>}
+      {searchOpen && <TerminalSearchBar onSearch={handleSearch} onClose={() => { setSearchOpen(false); termRef.current?.focus(); }} />}
       <div ref={containerRef} className={`min-h-0 flex-1 ${status === "open" ? "" : "invisible"}`} />
     </div>
   );

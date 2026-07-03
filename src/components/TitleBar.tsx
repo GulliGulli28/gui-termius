@@ -1,15 +1,28 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import appIconUrl from "../../src-tauri/icons/32x32.png";
+import type { AppNotification } from "../lib/notifications";
+import { NotificationBell } from "./NotificationBell";
 
 const appWindow = getCurrentWindow();
 
 interface TitleBarProps {
   sidebarVisible: boolean;
   onToggleSidebar: () => void;
+  notifications: AppNotification[];
+  onDismissNotification: (id: string) => void;
+  onClearAllNotifications: () => void;
+  onMarkAllNotificationsRead: () => void;
 }
 
-export function TitleBar({ sidebarVisible, onToggleSidebar }: TitleBarProps) {
+export function TitleBar({
+  sidebarVisible,
+  onToggleSidebar,
+  notifications,
+  onDismissNotification,
+  onClearAllNotifications,
+  onMarkAllNotificationsRead,
+}: TitleBarProps) {
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
@@ -40,6 +53,12 @@ export function TitleBar({ sidebarVisible, onToggleSidebar }: TitleBarProps) {
           <img src={appIconUrl} alt="" width={22} height={22} className="rounded-sm" />
           <span className="text-[11px] font-semibold tracking-wider text-slate-400">gui-termius</span>
         </div>
+        <NotificationBell
+          notifications={notifications}
+          onDismiss={onDismissNotification}
+          onClearAll={onClearAllNotifications}
+          onMarkAllRead={onMarkAllNotificationsRead}
+        />
       </div>
       <div className="flex h-full">
         <button onClick={() => appWindow.minimize()} aria-label="Réduire" className="flex h-full w-11 items-center justify-center text-slate-400 hover:bg-slate-800 hover:text-slate-100">

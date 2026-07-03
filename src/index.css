@@ -27,19 +27,18 @@ body,
   margin: 0;
 }
 
-/* Slim, unobtrusive scrollbars */
+/* Slim scrollbars — native model so scrollbar-gutter works (no webkit overlay) */
 * {
   scrollbar-width: thin;
   scrollbar-color: #334155 transparent;
 }
-*::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
-}
-*::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 9999px;
-}
-*::-webkit-scrollbar-track {
-  background: transparent;
+
+/* Sidebar scroll containers:
+   - scrollbar-gutter: stable → space for scrollbar is always reserved (no layout shift)
+   - padding-right → visual gap between card right border and the scrollbar track
+   Native scrollbars (no webkit override) respect both properties correctly. */
+.sidebar-scroll {
+  scrollbar-gutter: stable;
+  scrollbar-color: #334155 transparent;
+  padding-right: 6px;
 }

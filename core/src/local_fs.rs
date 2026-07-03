@@ -21,6 +21,7 @@ pub fn list(path: &str) -> anyhow::Result<Vec<Entry>> {
             is_symlink: metadata.is_symlink(),
             size: metadata.len(),
             modified,
+            permissions: None,
         });
     }
     Ok(entries)

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use termius_core::model::{PortForwardId, Workspace};
 use termius_core::port_forward::ActiveForward;
@@ -45,4 +46,6 @@ pub struct AppState {
     pub local_terminals: Mutex<HashMap<String, LocalTerminalSession>>,
     pub panes: Mutex<HashMap<String, Pane>>,
     pub forwards: Mutex<HashMap<PortForwardId, ForwardSession>>,
+    /// One cancellation flag per in-flight `upload_file`/`download_file` transfer, keyed by transfer id.
+    pub transfers: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }

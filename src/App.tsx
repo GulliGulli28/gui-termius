@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, bytesToBase64 } from "./lib/api";
-import type { GroupId, Host, HostId, Workspace } from "./lib/types";
+import type { GroupId, Host, TabMeta, Workspace } from "./lib/types";
 import { Sidebar, type SidebarPanelKind } from "./components/Sidebar";
 import { HostForm } from "./components/HostForm";
 import { TabBar } from "./components/TabBar";
@@ -12,10 +12,10 @@ import { type AppPreferences, ACCENT_COLORS, BG_THEMES, loadPreferences, savePre
 import { SplitPane } from "./components/SplitPane";
 import { GroupForm, type GroupFormData } from "./components/GroupForm";
 import { IconTerminal, IconClose } from "./components/ui-icons";
-
-type TabMeta =
-  | { id: string; kind: "terminal" | "transfer"; hostId: HostId; label: string }
-  | { id: string; kind: "local-terminal"; label: string; initialCommand?: string };
+import { type AppNotification, type NotificationKind, createNotification } from "./lib/notifications";
+import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
+import { SHORTCUT_ACTIONS, useGlobalShortcuts } from "./lib/shortcuts";
+import { loadTabs, saveTabs } from "./lib/tabPersistence";
 
 let nextTabId = 0;
 
@@ -29,8 +29,10 @@ export default function App() {
   const [tabs, setTabs] = useState<TabMeta[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [preferences, setPreferences] = useState<AppPreferences>(loadPreferences);
   const [splitOpen, setSplitOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const terminalRefs = useRef<Map<string, TerminalTabHandle>>(new Map());
 
   // ── Resizable panels ─────────────────────────────────────────────────────
@@ -47,7 +49,7 @@ export default function App() {
     const onMove = (e: MouseEvent) => {
       if (sidebarDragData.current) {
         const delta = e.clientX - sidebarDragData.current.startX;
-        setSidebarWidth(Math.max(200, Math.min(600, sidebarDragData.current.startWidth + delta)));
+        setSidebarWidth(Math.max(240, Math.min(600, sidebarDragData.current.startWidth + delta)));
       }
       if (rightDragData.current) {
         const delta = rightDragData.current.startX - e.clientX;
@@ -130,9 +132,29 @@ export default function App() {
     root.style.setProperty("--c-border", bg.border);
   }, [preferences.uiBg]);
 
-  useEffect(() => {
-    api.getWorkspace().then(setWorkspace).catch((e) => setStatus(String(e)));
+  // ── Notifications ────────────────────────────────────────────────────────
+  const pushNotification = useCallback((kind: NotificationKind, message: string) => {
+    setNotifications((prev) => [...prev, createNotification(kind, message)]);
   }, []);
+
+  const reportError = useCallback((message: string) => {
+    setStatus(message);
+    pushNotification("error", message);
+  }, [pushNotification]);
+
+  const dismissNotification = useCallback((id: string) => {
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
+  }, []);
+
+  const clearAllNotifications = useCallback(() => setNotifications([]), []);
+
+  const markAllNotificationsRead = useCallback(() => {
+    setNotifications((prev) => prev.map((n) => (n.read ? n : { ...n, read: true })));
+  }, []);
+
+  useEffect(() => {
+    api.getWorkspace().then(setWorkspace).catch((e) => reportError(String(e)));
+  }, [reportError]);
 
   const refreshWorkspace = useCallback((next: Workspace) => setWorkspace(next), []);
 
@@ -153,20 +175,57 @@ export default function App() {
 
   const toggleSplit = useCallback(() => setSplitOpen((v) => !v), []);
 
-  const closeTab = useCallback((id: string) => {
+  const reconnectTab = useCallback((id: string) => {
+    setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, status: "connected" } : t)));
+  }, []);
+
+  // Restore the last session's tab list (as disconnected placeholders) once, right after
+  // the workspace loads. Never auto-reconnects — the user clicks a placeholder to do that.
+  const restoredTabsRef = useRef(false);
+  useEffect(() => {
+    if (!workspace || restoredTabsRef.current) return;
+    restoredTabsRef.current = true;
+    if (!preferences.restoreTabsOnLaunch) return;
+    const persisted = loadTabs();
+    const restored: TabMeta[] = persisted.flatMap((p): TabMeta[] => {
+      const id = `tab-${nextTabId++}`;
+      if (p.kind === "local-terminal") {
+        return [{ id, kind: "local-terminal", label: p.label, status: "placeholder" }];
+      }
+      if (!p.hostId || !workspace.hosts.some((h) => h.id === p.hostId)) return [];
+      return [{ id, kind: p.kind, hostId: p.hostId, label: p.label, status: "placeholder" }];
+    });
+    if (restored.length > 0) {
+      setTabs(restored);
+      setActiveTabId(restored[0].id);
+    }
+  }, [workspace, preferences.restoreTabsOnLaunch]);
+
+  // Persist the (trimmed, session-less) tab list on every change, once the initial
+  // restore pass above has already run.
+  useEffect(() => {
+    if (!restoredTabsRef.current || !preferences.restoreTabsOnLaunch) return;
+    saveTabs(tabs);
+  }, [tabs, preferences.restoreTabsOnLaunch]);
+
+  const closeTab = useCallback((id: string, reason?: "disconnected") => {
     terminalRefs.current.get(id)?.dispose();
     terminalRefs.current.delete(id);
     setTabs((prev) => {
+      const closed = prev.find((t) => t.id === id);
+      if (reason === "disconnected" && closed && preferences.notifyOnDisconnect !== false) {
+        pushNotification("error", `Connexion perdue : ${closed.label}`);
+      }
       const next = prev.filter((t) => t.id !== id);
       setActiveTabId((current) => (current === id ? (next.length > 0 ? next[next.length - 1].id : null) : current));
       return next;
     });
-  }, []);
+  }, [preferences.notifyOnDisconnect, pushNotification]);
 
   const runSnippetOnActiveTerminal = useCallback((command: string) => {
-    if (!activeTabId) { setStatus("Aucun terminal actif pour exécuter ce snippet"); return; }
+    if (!activeTabId) { reportError("Aucun terminal actif pour exécuter ce snippet"); return; }
     const handle = terminalRefs.current.get(activeTabId);
-    if (!handle) { setStatus("L'onglet actif n'est pas un terminal"); return; }
+    if (!handle) { reportError("L'onglet actif n'est pas un terminal"); return; }
     if (command.includes("\n")) {
       // Encode script as base64 and decode+execute in one line so the terminal
       // only shows a compact command, not the full script content.
@@ -175,12 +234,55 @@ export default function App() {
     } else {
       handle.runCommand(command);
     }
-  }, [activeTabId]);
+  }, [activeTabId, reportError]);
+
+  // ── Global keyboard shortcuts + command palette ─────────────────────────
+  const shortcutHandlers: Record<string, () => void> = {
+    "palette.open": () => setPaletteOpen(true),
+    "sidebar.toggle": () => setSidebarVisible((v) => !v),
+    "split.toggle": () => toggleSplit(),
+    "tab.close": () => { if (activeTabId) closeTab(activeTabId); },
+    "tab.newLocalTerminal": () => openLocalTerminal(),
+    "tab.next": () => {
+      if (tabs.length === 0) return;
+      const idx = tabs.findIndex((t) => t.id === activeTabId);
+      setActiveTabId(tabs[(idx + 1) % tabs.length].id);
+    },
+    "tab.prev": () => {
+      if (tabs.length === 0) return;
+      const idx = tabs.findIndex((t) => t.id === activeTabId);
+      setActiveTabId(tabs[(idx - 1 + tabs.length) % tabs.length].id);
+    },
+    "settings.open": () => { setSidebarVisible(true); setSidebarPanel("settings"); },
+  };
+  useGlobalShortcuts(preferences.keyboardShortcuts, shortcutHandlers);
+
+  const paletteCommands: PaletteCommand[] = workspace ? [
+    ...SHORTCUT_ACTIONS.map((action) => ({
+      id: action.id,
+      label: action.label,
+      hint: preferences.keyboardShortcuts[action.id] || undefined,
+      run: () => shortcutHandlers[action.id]?.(),
+    })),
+    ...workspace.hosts.map((h) => ({
+      id: `host.connect.${h.id}`,
+      label: `Se connecter — ${h.label}`,
+      hint: "Hôte",
+      run: () => openTab("terminal", h),
+    })),
+  ] : [];
 
   if (!workspace) {
     return (
       <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--c-bg)] text-slate-100">
-        <TitleBar sidebarVisible={sidebarVisible} onToggleSidebar={() => setSidebarVisible((v) => !v)} />
+        <TitleBar
+          sidebarVisible={sidebarVisible}
+          onToggleSidebar={() => setSidebarVisible((v) => !v)}
+          notifications={notifications}
+          onDismissNotification={dismissNotification}
+          onClearAllNotifications={clearAllNotifications}
+          onMarkAllNotificationsRead={markAllNotificationsRead}
+        />
         <div className="flex flex-1 items-center justify-center text-slate-400">Chargement…</div>
       </div>
     );
@@ -192,7 +294,15 @@ export default function App() {
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--c-bg)] text-slate-100">
       {/* Transparent overlay during any drag — prevents xterm canvas from stealing mouse events */}
       {isDragging && <div className="fixed inset-0 z-[9999] cursor-col-resize" />}
-      <TitleBar sidebarVisible={sidebarVisible} onToggleSidebar={() => setSidebarVisible((v) => !v)} />
+      {paletteOpen && <CommandPalette commands={paletteCommands} onClose={() => setPaletteOpen(false)} />}
+      <TitleBar
+        sidebarVisible={sidebarVisible}
+        onToggleSidebar={() => setSidebarVisible((v) => !v)}
+        notifications={notifications}
+        onDismissNotification={dismissNotification}
+        onClearAllNotifications={clearAllNotifications}
+        onMarkAllNotificationsRead={markAllNotificationsRead}
+      />
 
       {status && (
         <div className="flex shrink-0 items-center justify-between bg-amber-900/60 px-4 py-2 text-sm text-amber-100">
@@ -212,6 +322,7 @@ export default function App() {
           onSelect={setActiveTabId}
           onClose={closeTab}
           onToggleSplit={toggleSplit}
+          onReorder={setTabs}
         />
       )}
 
@@ -236,16 +347,16 @@ export default function App() {
             onNewGroupUnder={(parentId) => { setEditingGroup({ id: null, name: "", parentId, icon: null }); setEditingHost(null); }}
             onEditGroup={(group) => { setEditingGroup({ id: group.id, name: group.name, parentId: group.parentId ?? null, icon: group.icon ?? null }); setEditingHost(null); }}
             onWorkspaceUpdate={refreshWorkspace}
-            onAddSnippet={(name, command) => api.addSnippet(name, command).then(refreshWorkspace).catch((e) => setStatus(String(e)))}
-            onUpdateSnippet={(id, name, command) => api.updateSnippet(id, name, command).then(refreshWorkspace).catch((e) => setStatus(String(e)))}
-            onDeleteSnippet={(id) => api.deleteSnippet(id).then(refreshWorkspace).catch((e) => setStatus(String(e)))}
+            onAddSnippet={(name, command) => api.addSnippet(name, command).then(refreshWorkspace).catch((e) => reportError(String(e)))}
+            onUpdateSnippet={(id, name, command) => api.updateSnippet(id, name, command).then(refreshWorkspace).catch((e) => reportError(String(e)))}
+            onDeleteSnippet={(id) => api.deleteSnippet(id).then(refreshWorkspace).catch((e) => reportError(String(e)))}
             onRunSnippet={runSnippetOnActiveTerminal}
-            onAddForward={(input) => api.addForward(input).then(refreshWorkspace).catch((e) => setStatus(String(e)))}
-            onDeleteForward={(id) => api.deleteForward(id).then(refreshWorkspace).catch((e) => setStatus(String(e)))}
-            onAddKey={(name, path, passphrase) => api.addPrivateKey(name, path, passphrase).then(refreshWorkspace).catch((e) => setStatus(String(e)))}
-            onDeleteKey={(id) => api.deletePrivateKey(id).then(refreshWorkspace).catch((e) => setStatus(String(e)))}
-            onRenameKey={(id, name) => api.renamePrivateKey(id, name).then(refreshWorkspace).catch((e) => setStatus(String(e)))}
-            onError={setStatus}
+            onAddForward={(input) => api.addForward(input).then(refreshWorkspace).catch((e) => reportError(String(e)))}
+            onDeleteForward={(id) => api.deleteForward(id).then(refreshWorkspace).catch((e) => reportError(String(e)))}
+            onAddKey={(name, path, passphrase) => api.addPrivateKey(name, path, passphrase).then(refreshWorkspace).catch((e) => reportError(String(e)))}
+            onDeleteKey={(id) => api.deletePrivateKey(id).then(refreshWorkspace).catch((e) => reportError(String(e)))}
+            onRenameKey={(id, name) => api.renamePrivateKey(id, name).then(refreshWorkspace).catch((e) => reportError(String(e)))}
+            onError={reportError}
             preferences={preferences}
             onPreferencesChange={updatePreferences}
           />
@@ -282,6 +393,23 @@ export default function App() {
               >
                 {tabs.map((tab) => {
                   const isActive = tab.id === activeTabId;
+                  if (tab.status === "placeholder") {
+                    return (
+                      <div key={tab.id} className={isActive ? "absolute inset-0 flex select-none flex-col items-center justify-center gap-3" : "hidden"}>
+                        <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-[var(--c-border)] bg-[var(--c-bg2)] text-slate-600">
+                          <IconTerminal size={22} />
+                        </div>
+                        <p className="text-sm text-slate-400">{tab.label}</p>
+                        <p className="text-xs text-slate-600">Session restaurée — non reconnectée</p>
+                        <button
+                          onClick={() => reconnectTab(tab.id)}
+                          className="rounded-md bg-[var(--c-accent)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--c-accent-hover)]"
+                        >
+                          Cliquer pour reconnecter
+                        </button>
+                      </div>
+                    );
+                  }
                   if (tab.kind === "local-terminal") {
                     return (
                       <div key={tab.id} className={isActive ? "absolute inset-0 flex flex-col" : "hidden"}>
@@ -289,7 +417,7 @@ export default function App() {
                           isActive={isActive}
                           preferences={preferences}
                           initialCommand={tab.initialCommand}
-                          onDisconnect={() => closeTab(tab.id)}
+                          onDisconnect={() => closeTab(tab.id, "disconnected")}
                           ref={(handle) => {
                             if (handle) terminalRefs.current.set(tab.id, handle);
                             else terminalRefs.current.delete(tab.id);
@@ -307,14 +435,14 @@ export default function App() {
                           host={host}
                           isActive={isActive}
                           preferences={preferences}
-                          onDisconnect={() => closeTab(tab.id)}
+                          onDisconnect={() => closeTab(tab.id, "disconnected")}
                           ref={(handle) => {
                             if (handle) terminalRefs.current.set(tab.id, handle);
                             else terminalRefs.current.delete(tab.id);
                           }}
                         />
                       ) : (
-                        <TransferTab host={host} workspace={workspace} onError={setStatus} />
+                        <TransferTab host={host} workspace={workspace} preferences={preferences} onError={reportError} />
                       )}
                     </div>
                   );
@@ -361,12 +489,12 @@ export default function App() {
               onSave={(input) => {
                 api.saveHost(input)
                   .then((ws) => { refreshWorkspace(ws); setEditingHost(null); })
-                  .catch((e) => setStatus(String(e)));
+                  .catch((e) => reportError(String(e)));
               }}
               onDeleteHost={editingHost !== "new" ? (id) => {
                 api.deleteHost(id)
                   .then((ws) => { refreshWorkspace(ws); setEditingHost(null); })
-                  .catch((e) => setStatus(String(e)));
+                  .catch((e) => reportError(String(e)));
               } : undefined}
               onWorkspaceUpdate={refreshWorkspace}
             />
@@ -379,12 +507,12 @@ export default function App() {
               onSave={(input) => {
                 api.saveGroup(input)
                   .then((ws) => { refreshWorkspace(ws); setEditingGroup(null); })
-                  .catch((e) => setStatus(String(e)));
+                  .catch((e) => reportError(String(e)));
               }}
               onDeleteGroup={editingGroup.id ? (id) => {
                 api.deleteGroup(id)
                   .then((ws) => { refreshWorkspace(ws); setEditingGroup(null); })
-                  .catch((e) => setStatus(String(e)));
+                  .catch((e) => reportError(String(e)));
               } : undefined}
               onWorkspaceUpdate={refreshWorkspace}
             />

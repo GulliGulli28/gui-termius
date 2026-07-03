@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
 import type { Group, GroupId, Host, HostId, Workspace } from "../lib/types";
@@ -7,13 +7,12 @@ import {
   IconHosts, IconSearch, IconPlus, IconKeyboard, IconFlash,
   IconFolder, IconChevronDown, IconChevronRight,
   IconDotsVertical, IconEdit,
-  IconTransfer, IconUpload, IconDownload,
+  IconUpload, IconDownload,
 } from "./ui-icons";
 
 interface HostsPanelProps {
   workspace: Workspace;
   onConnect: (host: Host) => void;
-  onOpenTransfer: (host: Host) => void;
   onOpenLocalTerminal: () => void;
   onNewHost: () => void;
   onEditHost: (host: Host) => void;
@@ -36,7 +35,7 @@ function parseSSHInput(raw: string): { username: string; address: string; port: 
 }
 
 export function HostsPanel({
-  workspace, onConnect, onOpenTransfer, onOpenLocalTerminal,
+  workspace, onConnect, onOpenLocalTerminal,
   onNewHost, onEditHost, onNewGroup, onNewHostInGroup, onNewGroupUnder,
   onEditGroup, onQuickSSH, onWorkspaceUpdate, onError,
 }: HostsPanelProps) {
@@ -44,6 +43,23 @@ export function HostsPanel({
   const [collapsed, setCollapsed] = useState<Set<GroupId>>(new Set());
   const [openMenuHostId, setOpenMenuHostId] = useState<HostId | null>(null);
   const [showAddMenu, setShowAddMenu] = useState(false);
+  const [hostStatus, setHostStatus] = useState<Record<string, boolean>>({});
+
+  const hostIdsKey = workspace.hosts.map((h) => h.id).join(",");
+  useEffect(() => {
+    let cancelled = false;
+    const poll = () => {
+      for (const host of workspace.hosts) {
+        api.checkHostStatus(host.id)
+          .then((online) => { if (!cancelled) setHostStatus((prev) => ({ ...prev, [host.id]: online })); })
+          .catch(() => { if (!cancelled) setHostStatus((prev) => ({ ...prev, [host.id]: false })); });
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 30000);
+    return () => { cancelled = true; clearInterval(interval); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostIdsKey]);
 
   const quickSSH = parseSSHInput(search);
 
@@ -120,11 +136,19 @@ export function HostsPanel({
             className="flex min-w-0 flex-1 items-center gap-2.5 p-2.5 text-left"
             title={`Connecter — ${host.username}@${host.address}:${host.port}`}
           >
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--c-accent-dim)]">
+            <div className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--c-accent-dim)]">
               {host.icon
                 ? <HostIcon iconId={host.icon} customIcons={workspace.customIcons} size={18} />
                 : <IconHosts size={14} className="text-[var(--c-accent-text)]" />
               }
+              {hostStatus[host.id] !== undefined && (
+                <span
+                  title={hostStatus[host.id] ? "En ligne" : "Hors ligne"}
+                  className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[var(--c-bg2)] ${
+                    hostStatus[host.id] ? "bg-emerald-500" : "bg-slate-600"
+                  }`}
+                />
+              )}
             </div>
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-medium text-slate-100">{host.label}</div>
@@ -160,22 +184,16 @@ export function HostsPanel({
 
         {/* Expanded actions */}
         {menuOpen && (
-          <div className="grid grid-cols-3 gap-1 border-t border-[var(--c-border)] p-2">
-            <button
-              onClick={() => { onOpenTransfer(host); setOpenMenuHostId(null); }}
-              className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-700/60"
-            >
-              <IconTransfer size={12} /> Transfert
-            </button>
+          <div className="flex flex-wrap gap-1 border-t border-[var(--c-border)] p-2">
             <button
               onClick={() => { onEditHost(host); setOpenMenuHostId(null); }}
-              className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-700/60"
+              className="flex flex-1 basis-[80px] items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-700/60"
             >
               <IconEdit size={12} /> Éditer
             </button>
             <button
               onClick={() => { handleExportHost(host); setOpenMenuHostId(null); }}
-              className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-700/60"
+              className="flex flex-1 basis-[80px] items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-700/60"
             >
               <IconUpload size={12} /> Exporter
             </button>
@@ -239,7 +257,7 @@ export function HostsPanel({
   };
 
   return (
-    <div className="flex h-full flex-col gap-2">
+    <div className="flex h-full min-w-0 flex-col gap-2">
       {/* Search — first for discoverability */}
       <div className="relative">
         <div className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center">
@@ -305,7 +323,7 @@ export function HostsPanel({
       </div>
 
       {/* Host list */}
-      <div className="flex-1 space-y-1 overflow-y-auto">
+      <div className="sidebar-scroll min-h-0 min-w-0 flex-1 space-y-1 overflow-y-auto">
         {quickSSH && (
           <button
             onClick={handleQuickConnect}

@@ -1,7 +1,9 @@
 //! SFTP file browsing over an established [`crate::ssh::Connection`].
 use crate::ssh::Connection;
+use russh_sftp::client::fs::Metadata;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,7 +13,15 @@ pub struct Entry {
     pub is_symlink: bool,
     pub size: u64,
     pub modified: Option<u64>,
+    /// POSIX permission bits (e.g. `0o755`), when the server reports them. `None` on
+    /// filesystems without a meaningful POSIX mode (e.g. local Windows entries).
+    #[serde(default)]
+    pub permissions: Option<u32>,
 }
+
+/// Chunk size for streamed uploads/downloads — small enough to report smooth
+/// progress, large enough to not dominate transfer time with round-trips.
+const CHUNK_SIZE: usize = 256 * 1024;
 
 pub struct SftpClient {
     session: SftpSession,
@@ -42,6 +52,7 @@ impl SftpClient {
                     is_symlink: metadata.file_type().is_symlink(),
                     size: metadata.len(),
                     modified: metadata.mtime.map(|t| t as u64),
+                    permissions: metadata.permissions.map(|p| p & 0o7777),
                 }
             })
             .collect();
@@ -65,19 +76,70 @@ impl SftpClient {
         Ok(self.session.rename(from, to).await?)
     }
 
-    pub async fn download(&self, remote_path: &str, local_path: &std::path::Path) -> anyhow::Result<()> {
-        let data = self.session.read(remote_path).await?;
-        tokio::fs::write(local_path, data).await?;
+    pub async fn set_permissions(&self, path: &str, mode: u32) -> anyhow::Result<()> {
+        let attrs = Metadata { permissions: Some(mode), ..Default::default() };
+        Ok(self.session.set_metadata(path, attrs).await?)
+    }
+
+    /// Downloads in fixed-size chunks, reporting `(bytes_done, bytes_total)` after each
+    /// one so callers can surface progress — `total` is passed in rather than re-queried
+    /// from the server since the caller (a directory listing) already knows it.
+    pub async fn download(
+        &self,
+        remote_path: &str,
+        local_path: &std::path::Path,
+        total: u64,
+        cancel: &AtomicBool,
+        mut on_progress: impl FnMut(u64, u64),
+    ) -> anyhow::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut remote_file = self.session.open(remote_path).await?;
+        let mut local_file = tokio::fs::File::create(local_path).await?;
+        let mut buf = vec![0u8; CHUNK_SIZE];
+        let mut done = 0u64;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("transfert annulé");
+            }
+            let n = remote_file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            local_file.write_all(&buf[..n]).await?;
+            done += n as u64;
+            on_progress(done, total);
+        }
         Ok(())
     }
 
-    pub async fn upload(&self, local_path: &std::path::Path, remote_path: &str) -> anyhow::Result<()> {
-        use tokio::io::AsyncWriteExt;
-        let data = tokio::fs::read(local_path).await?;
+    /// Uploads in fixed-size chunks, reporting `(bytes_done, bytes_total)` after each one.
+    pub async fn upload(
+        &self,
+        local_path: &std::path::Path,
+        remote_path: &str,
+        cancel: &AtomicBool,
+        mut on_progress: impl FnMut(u64, u64),
+    ) -> anyhow::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut local_file = tokio::fs::File::open(local_path).await?;
+        let total = local_file.metadata().await?.len();
         // `create` (unlike `write`) opens with CREATE|TRUNCATE, since the
         // remote file generally doesn't exist yet.
-        let mut file = self.session.create(remote_path).await?;
-        file.write_all(&data).await?;
+        let mut remote_file = self.session.create(remote_path).await?;
+        let mut buf = vec![0u8; CHUNK_SIZE];
+        let mut done = 0u64;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("transfert annulé");
+            }
+            let n = local_file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            remote_file.write_all(&buf[..n]).await?;
+            done += n as u64;
+            on_progress(done, total);
+        }
         Ok(())
     }
 }

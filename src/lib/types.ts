@@ -38,6 +38,8 @@ export interface Host {
   startupSnippets: SnippetId[];
   envVars: EnvVar[];
   icon?: string;
+  keepaliveIntervalSecs?: number | null;
+  agentForward?: boolean;
 }
 
 export interface Snippet {
@@ -75,12 +77,41 @@ export interface Workspace {
   customIcons: CustomIcon[];
 }
 
+export interface KnownHostEntry {
+  identity: string;
+  publicKey: string;
+}
+
+export interface SshConfigHost {
+  alias: string;
+  hostname: string | null;
+  user: string | null;
+  port: number | null;
+  identityFile: string | null;
+  proxyJump: string | null;
+}
+
+export interface ImportSelection {
+  alias: string;
+  hostname: string;
+  user: string;
+  port: number;
+  groupId: GroupId | null;
+}
+
 export interface Entry {
   name: string;
   isDir: boolean;
   isSymlink: boolean;
   size: number;
   modified?: number;
+  permissions?: number | null;
+}
+
+export interface TransferProgressEvent {
+  transferId: string;
+  bytesDone: number;
+  bytesTotal: number;
 }
 
 export type PaneSource = { kind: "local" } | { kind: "remote"; hostId: HostId };
@@ -104,6 +135,10 @@ export interface PaneState {
   entries: Entry[];
   error?: string;
 }
+
+export type TabMeta =
+  | { id: string; kind: "terminal" | "transfer"; hostId: HostId; label: string; status?: "connected" | "placeholder" }
+  | { id: string; kind: "local-terminal"; label: string; initialCommand?: string; status?: "connected" | "placeholder" };
 
 export type Tab =
   | { id: string; kind: "terminal"; hostId: HostId; label: string; sessionId: string | null; status: "connecting" | "open" | "failed"; error?: string }

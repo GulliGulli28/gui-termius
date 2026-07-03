@@ -26,6 +26,8 @@ interface HostFormProps {
     envVars: EnvVar[];
     icon: string | null;
     secret: string | null;
+    keepaliveIntervalSecs: number | null;
+    agentForward: boolean;
   }) => void;
   onDeleteHost?: (id: HostId) => void;
   onWorkspaceUpdate?: (ws: Workspace) => void;
@@ -60,6 +62,8 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
   const [tagInput, setTagInput] = useState("");
   const [startupSnippets, setStartupSnippets] = useState<SnippetId[]>(host?.startupSnippets ?? []);
   const [envVars, setEnvVars] = useState<EnvVar[]>(host?.envVars ?? []);
+  const [keepalive, setKeepalive] = useState(String(host?.keepaliveIntervalSecs ?? 0));
+  const [agentForward, setAgentForward] = useState(host?.agentForward ?? false);
   const [icon, setIcon] = useState<string | null>(host?.icon ?? null);
   const [showIconPicker, setShowIconPicker] = useState(false);
   const [keyPrompt, setKeyPrompt] = useState<{ path: string } | null>(null);
@@ -140,6 +144,7 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
     }
 
     const auth: AuthMethod = authKind === "agent" ? "agent" : authKind === "password" ? "password" : { privateKey: { path: keyPath.trim(), keyId } };
+    const keepaliveNum = Number(keepalive);
 
     onSave({
       id: host?.id ?? null,
@@ -155,6 +160,8 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
       envVars: envVars.filter((v) => v.key.trim()),
       icon,
       secret: secret || null,
+      keepaliveIntervalSecs: Number.isInteger(keepaliveNum) && keepaliveNum > 0 ? keepaliveNum : null,
+      agentForward: authKind === "agent" && agentForward,
     });
   };
 
@@ -218,6 +225,10 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
           <input value={username} onChange={(e) => setUsername(e.target.value)} className={inputClass} />
         </Field>
 
+        <Field label="Keepalive (secondes, 0 = désactivé)">
+          <input value={keepalive} onChange={(e) => setKeepalive(e.target.value)} inputMode="numeric" className={inputClass} />
+        </Field>
+
         <Field label="Authentification">
           <select value={authKind} onChange={(e) => setAuthKind(e.target.value as AuthKind)} className={inputClass}>
             <option value="agent">Agent SSH</option>
@@ -225,6 +236,24 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
             <option value="privateKey">Clé privée</option>
           </select>
         </Field>
+
+        {authKind === "agent" && (
+          <label className="flex items-start gap-2 rounded-md border border-[var(--c-border)] bg-slate-800/40 p-2.5">
+            <input
+              type="checkbox"
+              checked={agentForward}
+              onChange={(e) => setAgentForward(e.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--c-accent)]"
+            />
+            <span className="text-xs text-slate-400">
+              <span className="font-medium text-slate-300">Transférer l'agent SSH vers cet hôte</span>
+              <br />
+              L'hôte distant pourra utiliser vos clés locales pour rebondir ailleurs (ex. un autre bastion, un dépôt Git),
+              sans qu'elles ne quittent votre machine. N'activez que pour des hôtes de confiance : un hôte compromis
+              pourrait abuser de l'agent transféré pendant toute la durée de la session.
+            </span>
+          </label>
+        )}
 
         {authKind === "privateKey" && (
           <>

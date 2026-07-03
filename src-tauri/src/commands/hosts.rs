@@ -27,6 +27,10 @@ pub struct SaveHostInput {
     pub icon: Option<String>,
     /// Plaintext password or key passphrase, stored in the OS keychain — never persisted in workspace.json.
     pub secret: Option<String>,
+    #[serde(default)]
+    pub keepalive_interval_secs: Option<u32>,
+    #[serde(default)]
+    pub agent_forward: bool,
 }
 
 fn persist(workspace: &Workspace) -> Result<(), String> {
@@ -51,6 +55,8 @@ pub fn save_host(state: State<'_, AppState>, input: SaveHostInput) -> Result<Wor
                 host.startup_snippets = input.startup_snippets;
                 host.env_vars = input.env_vars;
                 host.icon = input.icon.clone();
+                host.keepalive_interval_secs = input.keepalive_interval_secs;
+                host.agent_forward = input.agent_forward;
             }
             id
         },
@@ -64,6 +70,8 @@ pub fn save_host(state: State<'_, AppState>, input: SaveHostInput) -> Result<Wor
             host.startup_snippets = input.startup_snippets;
             host.env_vars = input.env_vars;
             host.icon = input.icon.clone();
+            host.keepalive_interval_secs = input.keepalive_interval_secs;
+            host.agent_forward = input.agent_forward;
             let id = host.id;
             workspace.hosts.push(host);
             id
@@ -167,6 +175,16 @@ pub fn read_icon_file(path: String) -> Result<String, String> {
     };
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(format!("data:{};base64,{}", mime, b64))
+}
+
+#[tauri::command]
+pub async fn check_host_status(state: State<'_, AppState>, host_id: HostId) -> Result<bool, String> {
+    let host = {
+        let workspace = state.workspace.lock().expect("lock poisoned");
+        workspace.host(host_id).cloned()
+    };
+    let host = host.ok_or_else(|| "hôte introuvable".to_string())?;
+    Ok(termius_core::ssh::probe(&host).await)
 }
 
 #[tauri::command]
