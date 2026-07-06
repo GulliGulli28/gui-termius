@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "gui-termius",
-  "version": "1.4.0",
   "identifier": "dev.guitermius.app",
   "build": {
     "beforeDevCommand": "npm run dev",
