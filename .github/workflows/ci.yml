@@ -21,6 +21,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The integration tests spawn a real sshd (core/tests/common/mod.rs) to
+      # talk to over a loopback connection; ubuntu-latest doesn't ship it.
+      - name: Install openssh-server
+        run: sudo apt-get update && sudo apt-get install -y openssh-server
+
       - name: Clippy (termius-core)
         run: cargo clippy -p termius-core --all-targets -- -D warnings
 
@@ -50,8 +55,11 @@ jobs:
       - name: Clippy (workspace)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test (workspace)
-        run: cargo test --workspace
+      # --lib/--bins only: the core/tests/*integration.rs suites spawn a real
+      # /usr/sbin/sshd and read $USER, both Unix-only — they run in the
+      # `core` job on Linux instead, not here.
+      - name: Test (workspace, unit tests only)
+        run: cargo test --workspace --lib --bins
 
       - name: Build (workspace)
         run: cargo build --workspace
