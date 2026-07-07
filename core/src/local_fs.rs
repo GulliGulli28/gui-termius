@@ -4,7 +4,9 @@
 use crate::sftp::Entry;
 
 pub fn home_dir() -> String {
-    directories::UserDirs::new().map(|d| d.home_dir().to_string_lossy().to_string()).unwrap_or_else(|| "/".to_string())
+    directories::UserDirs::new()
+        .map(|d| d.home_dir().to_string_lossy().to_string())
+        .unwrap_or_else(|| "/".to_string())
 }
 
 pub fn list(path: &str) -> anyhow::Result<Vec<Entry>> {
@@ -12,7 +14,9 @@ pub fn list(path: &str) -> anyhow::Result<Vec<Entry>> {
     for item in std::fs::read_dir(path)? {
         let item = item?;
         let metadata = item.metadata()?;
-        let modified = metadata.modified().ok()
+        let modified = metadata
+            .modified()
+            .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
         entries.push(Entry {

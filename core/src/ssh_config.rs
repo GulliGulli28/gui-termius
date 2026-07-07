@@ -35,8 +35,14 @@ fn parse_str(content: &str) -> Vec<SshConfigHost> {
             continue;
         }
         let mut parts = line.splitn(2, |c: char| c.is_whitespace() || c == '=');
-        let Some(keyword) = parts.next() else { continue };
-        let value = parts.next().unwrap_or("").trim_start_matches(|c: char| c.is_whitespace() || c == '=').trim();
+        let Some(keyword) = parts.next() else {
+            continue;
+        };
+        let value = parts
+            .next()
+            .unwrap_or("")
+            .trim_start_matches(|c: char| c.is_whitespace() || c == '=')
+            .trim();
 
         match keyword.to_ascii_lowercase().as_str() {
             "host" => {
@@ -54,13 +60,33 @@ fn parse_str(content: &str) -> Vec<SshConfigHost> {
                         proxy_jump: None,
                     });
                 }
-            },
-            "hostname" => if let Some(h) = current.as_mut() { h.hostname = Some(value.to_string()); },
-            "user" => if let Some(h) = current.as_mut() { h.user = Some(value.to_string()); },
-            "port" => if let Some(h) = current.as_mut() { h.port = value.parse().ok(); },
-            "identityfile" => if let Some(h) = current.as_mut() { h.identity_file = Some(value.to_string()); },
-            "proxyjump" => if let Some(h) = current.as_mut() { h.proxy_jump = Some(value.to_string()); },
-            _ => {},
+            }
+            "hostname" => {
+                if let Some(h) = current.as_mut() {
+                    h.hostname = Some(value.to_string());
+                }
+            }
+            "user" => {
+                if let Some(h) = current.as_mut() {
+                    h.user = Some(value.to_string());
+                }
+            }
+            "port" => {
+                if let Some(h) = current.as_mut() {
+                    h.port = value.parse().ok();
+                }
+            }
+            "identityfile" => {
+                if let Some(h) = current.as_mut() {
+                    h.identity_file = Some(value.to_string());
+                }
+            }
+            "proxyjump" => {
+                if let Some(h) = current.as_mut() {
+                    h.proxy_jump = Some(value.to_string());
+                }
+            }
+            _ => {}
         }
     }
     if let Some(host) = current.take() {

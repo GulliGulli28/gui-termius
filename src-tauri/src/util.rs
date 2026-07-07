@@ -1,5 +1,5 @@
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 
 pub fn encode(bytes: &[u8]) -> String {
     STANDARD.encode(bytes)

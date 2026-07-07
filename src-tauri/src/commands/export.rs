@@ -3,7 +3,11 @@ use tauri::State;
 use termius_core::{export as ex, model::HostId, store};
 
 #[tauri::command]
-pub fn export_workspace(state: State<'_, AppState>, path: String, include_key_material: bool) -> Result<(), String> {
+pub fn export_workspace(
+    state: State<'_, AppState>,
+    path: String,
+    include_key_material: bool,
+) -> Result<(), String> {
     let workspace = state.workspace.lock().expect("lock poisoned").clone();
     let data = ex::make_workspace_export(&workspace, include_key_material);
     let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
@@ -17,8 +21,8 @@ pub fn import_workspace(
     replace: bool,
 ) -> Result<termius_core::model::Workspace, String> {
     let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let file: ex::WorkspaceExport = serde_json::from_str(&json)
-        .map_err(|e| format!("Format invalide : {}", e))?;
+    let file: ex::WorkspaceExport =
+        serde_json::from_str(&json).map_err(|e| format!("Format invalide : {}", e))?;
 
     let mut workspace = state.workspace.lock().expect("lock poisoned");
     if replace {
@@ -55,8 +59,8 @@ pub fn import_host_from_file(
     path: String,
 ) -> Result<termius_core::model::Workspace, String> {
     let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let file: ex::HostExport = serde_json::from_str(&json)
-        .map_err(|e| format!("Format invalide : {}", e))?;
+    let file: ex::HostExport =
+        serde_json::from_str(&json).map_err(|e| format!("Format invalide : {}", e))?;
 
     let mut workspace = state.workspace.lock().expect("lock poisoned");
     ex::import_host(&mut workspace, file);

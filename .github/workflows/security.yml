@@ -1,0 +1,51 @@
+name: Security
+
+# Dependency vulnerability scanning. Separate from ci.yml so it can run on its
+# own weekly schedule (advisories can appear against an unchanged Cargo.lock /
+# package-lock.json) without re-running the build/test jobs.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Known advisories we've reviewed and accepted are listed in
+      # .cargo/audit.toml (with the reasoning); anything new fails the job.
+      - name: cargo audit
+        run: cargo audit
+
+  npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Blocking: the app's actual runtime dependencies must stay clean.
+      - name: npm audit (production dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
+      # Informational only: vite/esbuild currently carry a dev-server-only
+      # advisory (exploitable only while `vite dev` is running, not in the
+      # built app) whose fix is a breaking vite major bump. Surfaced here
+      # without blocking CI on it; revisit next time deps are upgraded.
+      - name: npm audit (dev dependencies, non-blocking)
+        run: npm audit --audit-level=high || true

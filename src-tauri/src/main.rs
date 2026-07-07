@@ -20,10 +20,9 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(app_state)
         .setup(|app| {
-            if let Some(window) = app.get_webview_window("main") {
-                if let Some(icon) = app.default_window_icon() {
-                    let _ = window.set_icon(icon.clone() as _);
-                }
+            if let Some(window) = app.get_webview_window("main")
+                && let Some(icon) = app.default_window_icon() {
+                let _ = window.set_icon(icon.clone() as _);
             }
             Ok(())
         })

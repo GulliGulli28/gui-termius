@@ -18,7 +18,9 @@ pub enum Verdict {
     /// A different key was already trusted for this identity. Carries the
     /// previously-trusted key's fingerprint so callers can surface a precise
     /// "the host key changed" message instead of a generic rejection.
-    Mismatch { previous_fingerprint: String },
+    Mismatch {
+        previous_fingerprint: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -63,29 +65,46 @@ pub fn check_and_trust(identity: &str, label: &str, key: &PublicKey) -> anyhow::
     match store.0.get(identity) {
         Some(entry) if entry.public_key == encoded => {
             if entry.label != label {
-                store.0.insert(identity.to_string(), Entry { label: label.to_string(), public_key: encoded });
+                store.0.insert(
+                    identity.to_string(),
+                    Entry {
+                        label: label.to_string(),
+                        public_key: encoded,
+                    },
+                );
                 write(&store)?;
             }
             Ok(Verdict::AlreadyTrusted)
-        },
+        }
         Some(entry) => {
             let previous_fingerprint = PublicKey::from_openssh(&entry.public_key)
                 .map(|k| k.fingerprint(HashAlg::Sha256).to_string())
                 .unwrap_or_else(|_| entry.public_key.clone());
-            Ok(Verdict::Mismatch { previous_fingerprint })
-        },
+            Ok(Verdict::Mismatch {
+                previous_fingerprint,
+            })
+        }
         None => {
-            store.0.insert(identity.to_string(), Entry { label: label.to_string(), public_key: encoded });
+            store.0.insert(
+                identity.to_string(),
+                Entry {
+                    label: label.to_string(),
+                    public_key: encoded,
+                },
+            );
             write(&store)?;
             Ok(Verdict::NewlyTrusted)
-        },
+        }
     }
 }
 
 /// Lists every trusted `(identity, label, openssh-encoded public key)`, sorted by label.
 pub fn list() -> Vec<(String, String, String)> {
-    let mut entries: Vec<(String, String, String)> =
-        read().0.into_iter().map(|(identity, entry)| (identity, entry.label, entry.public_key)).collect();
+    let mut entries: Vec<(String, String, String)> = read()
+        .0
+        .into_iter()
+        .map(|(identity, entry)| (identity, entry.label, entry.public_key))
+        .collect();
     entries.sort_by(|a, b| a.1.cmp(&b.1));
     entries
 }

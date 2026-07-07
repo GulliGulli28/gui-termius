@@ -1,7 +1,10 @@
 use crate::state::AppState;
 use serde::Deserialize;
 use tauri::State;
-use termius_core::model::{AuthMethod, CustomIcon, EnvVar, Group, GroupId, Host, HostId, KeyId, PortForward, PortForwardId, PrivateKey, Snippet, SnippetId, Workspace};
+use termius_core::model::{
+    AuthMethod, CustomIcon, EnvVar, Group, GroupId, Host, HostId, KeyId, PortForward,
+    PortForwardId, PrivateKey, Snippet, SnippetId, Workspace,
+};
 use termius_core::store;
 use termius_core::vault::{self, SecretKind};
 
@@ -59,7 +62,7 @@ pub fn save_host(state: State<'_, AppState>, input: SaveHostInput) -> Result<Wor
                 host.agent_forward = input.agent_forward;
             }
             id
-        },
+        }
         None => {
             let mut host = Host::new(input.label, input.address, input.username);
             host.port = input.port;
@@ -75,28 +78,39 @@ pub fn save_host(state: State<'_, AppState>, input: SaveHostInput) -> Result<Wor
             let id = host.id;
             workspace.hosts.push(host);
             id
-        },
+        }
     };
 
     // Clean up whichever per-host secret slot no longer applies to the (possibly
     // just-changed) auth method, so e.g. switching Password -> Agent doesn't leave
     // a stale password behind in the OS keychain indefinitely.
     match &input.auth {
-        AuthMethod::Password => { let _ = vault::delete(host_id, SecretKind::KeyPassphrase); },
-        AuthMethod::PrivateKey { key_id: None, .. } => { let _ = vault::delete(host_id, SecretKind::Password); },
-        AuthMethod::PrivateKey { key_id: Some(_), .. } | AuthMethod::Agent => {
+        AuthMethod::Password => {
+            let _ = vault::delete(host_id, SecretKind::KeyPassphrase);
+        }
+        AuthMethod::PrivateKey { key_id: None, .. } => {
+            let _ = vault::delete(host_id, SecretKind::Password);
+        }
+        AuthMethod::PrivateKey {
+            key_id: Some(_), ..
+        }
+        | AuthMethod::Agent => {
             let _ = vault::delete(host_id, SecretKind::Password);
             let _ = vault::delete(host_id, SecretKind::KeyPassphrase);
-        },
+        }
     }
 
     if let Some(secret) = input.secret.filter(|s| !s.is_empty()) {
         match &input.auth {
-            AuthMethod::Password => { let _ = vault::store(host_id, SecretKind::Password, &secret); },
+            AuthMethod::Password => {
+                let _ = vault::store(host_id, SecretKind::Password, &secret);
+            }
             // Only store the passphrase per-host when no keychain key is involved;
             // keychain keys have their own passphrase stored under key_id.
-            AuthMethod::PrivateKey { key_id: None, .. } => { let _ = vault::store(host_id, SecretKind::KeyPassphrase, &secret); },
-            _ => {},
+            AuthMethod::PrivateKey { key_id: None, .. } => {
+                let _ = vault::store(host_id, SecretKind::KeyPassphrase, &secret);
+            }
+            _ => {}
         }
     }
 
@@ -105,11 +119,21 @@ pub fn save_host(state: State<'_, AppState>, input: SaveHostInput) -> Result<Wor
 }
 
 #[tauri::command]
-pub fn add_private_key(state: State<'_, AppState>, name: String, path: String, passphrase: Option<String>) -> Result<Workspace, String> {
+pub fn add_private_key(
+    state: State<'_, AppState>,
+    name: String,
+    path: String,
+    passphrase: Option<String>,
+) -> Result<Workspace, String> {
     let mut workspace = state.workspace.lock().expect("lock poisoned");
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Impossible de lire la clé «{}» : {}", path, e))?;
-    let key = PrivateKey { id: KeyId::new_v4(), name, path, content: Some(content) };
+    let key = PrivateKey {
+        id: KeyId::new_v4(),
+        name,
+        path,
+        content: Some(content),
+    };
     if let Some(pp) = passphrase.filter(|s| !s.is_empty()) {
         let _ = vault::store(key.id, vault::SecretKind::KeyPassphrase, &pp);
     }
@@ -128,7 +152,11 @@ pub fn delete_private_key(state: State<'_, AppState>, key_id: KeyId) -> Result<W
 }
 
 #[tauri::command]
-pub fn rename_private_key(state: State<'_, AppState>, key_id: KeyId, name: String) -> Result<Workspace, String> {
+pub fn rename_private_key(
+    state: State<'_, AppState>,
+    key_id: KeyId,
+    name: String,
+) -> Result<Workspace, String> {
     let mut workspace = state.workspace.lock().expect("lock poisoned");
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -142,22 +170,35 @@ pub fn rename_private_key(state: State<'_, AppState>, key_id: KeyId, name: Strin
 }
 
 #[tauri::command]
-pub fn add_custom_icon(state: State<'_, AppState>, name: String, data_url: String) -> Result<Workspace, String> {
+pub fn add_custom_icon(
+    state: State<'_, AppState>,
+    name: String,
+    data_url: String,
+) -> Result<Workspace, String> {
     let mut workspace = state.workspace.lock().expect("lock poisoned");
     let id = uuid::Uuid::new_v4().to_string();
-    workspace.custom_icons.push(CustomIcon { id, name, data_url });
+    workspace
+        .custom_icons
+        .push(CustomIcon { id, name, data_url });
     persist(&workspace)?;
     Ok(workspace.clone())
 }
 
 #[tauri::command]
-pub fn delete_custom_icon(state: State<'_, AppState>, icon_id: String) -> Result<Workspace, String> {
+pub fn delete_custom_icon(
+    state: State<'_, AppState>,
+    icon_id: String,
+) -> Result<Workspace, String> {
     let mut workspace = state.workspace.lock().expect("lock poisoned");
     for host in &mut workspace.hosts {
-        if host.icon.as_deref() == Some(&icon_id) { host.icon = None; }
+        if host.icon.as_deref() == Some(&icon_id) {
+            host.icon = None;
+        }
     }
     for group in &mut workspace.groups {
-        if group.icon.as_deref() == Some(&icon_id) { group.icon = None; }
+        if group.icon.as_deref() == Some(&icon_id) {
+            group.icon = None;
+        }
     }
     workspace.custom_icons.retain(|i| i.id != icon_id);
     persist(&workspace)?;
@@ -190,7 +231,10 @@ pub fn read_icon_file(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn check_host_status(state: State<'_, AppState>, host_id: HostId) -> Result<bool, String> {
+pub async fn check_host_status(
+    state: State<'_, AppState>,
+    host_id: HostId,
+) -> Result<bool, String> {
     let workspace = state.workspace.lock().expect("lock poisoned").clone();
     Ok(termius_core::ssh::probe(&workspace, host_id).await)
 }
@@ -221,14 +265,22 @@ pub struct SaveGroupInput {
 
 /// Whether setting `group_id`'s parent to `new_parent_id` would create a cycle
 /// (a group can't end up being its own ancestor).
-fn would_create_group_cycle(workspace: &Workspace, group_id: GroupId, new_parent_id: Option<GroupId>) -> bool {
+fn would_create_group_cycle(
+    workspace: &Workspace,
+    group_id: GroupId,
+    new_parent_id: Option<GroupId>,
+) -> bool {
     let mut current = new_parent_id;
     let mut seen = std::collections::HashSet::new();
     while let Some(id) = current {
         if id == group_id || !seen.insert(id) {
             return true;
         }
-        current = workspace.groups.iter().find(|g| g.id == id).and_then(|g| g.parent_id);
+        current = workspace
+            .groups
+            .iter()
+            .find(|g| g.id == id)
+            .and_then(|g| g.parent_id);
     }
     false
 }
@@ -247,8 +299,14 @@ pub fn save_group(state: State<'_, AppState>, input: SaveGroupInput) -> Result<W
                 group.icon = input.icon.clone();
                 group.color = input.color.clone();
             }
-        },
-        None => workspace.groups.push(Group { id: GroupId::new_v4(), name: input.name, parent_id: input.parent_id, icon: input.icon, color: input.color }),
+        }
+        None => workspace.groups.push(Group {
+            id: GroupId::new_v4(),
+            name: input.name,
+            parent_id: input.parent_id,
+            icon: input.icon,
+            color: input.color,
+        }),
     }
     persist(&workspace)?;
     Ok(workspace.clone())
@@ -257,7 +315,11 @@ pub fn save_group(state: State<'_, AppState>, input: SaveGroupInput) -> Result<W
 #[tauri::command]
 pub fn delete_group(state: State<'_, AppState>, group_id: GroupId) -> Result<Workspace, String> {
     let mut workspace = state.workspace.lock().expect("lock poisoned");
-    let parent_id = workspace.groups.iter().find(|g| g.id == group_id).and_then(|g| g.parent_id);
+    let parent_id = workspace
+        .groups
+        .iter()
+        .find(|g| g.id == group_id)
+        .and_then(|g| g.parent_id);
     // Re-parent child groups and hosts up to the deleted group's parent instead
     // of leaving them dangling on a removed group.
     for group in &mut workspace.groups {
@@ -276,15 +338,29 @@ pub fn delete_group(state: State<'_, AppState>, group_id: GroupId) -> Result<Wor
 }
 
 #[tauri::command]
-pub fn add_snippet(state: State<'_, AppState>, name: String, command: String) -> Result<Workspace, String> {
+pub fn add_snippet(
+    state: State<'_, AppState>,
+    name: String,
+    command: String,
+) -> Result<Workspace, String> {
     let mut workspace = state.workspace.lock().expect("lock poisoned");
-    workspace.snippets.push(Snippet { id: SnippetId::new_v4(), name, command, tags: Vec::new() });
+    workspace.snippets.push(Snippet {
+        id: SnippetId::new_v4(),
+        name,
+        command,
+        tags: Vec::new(),
+    });
     persist(&workspace)?;
     Ok(workspace.clone())
 }
 
 #[tauri::command]
-pub fn update_snippet(state: State<'_, AppState>, snippet_id: SnippetId, name: String, command: String) -> Result<Workspace, String> {
+pub fn update_snippet(
+    state: State<'_, AppState>,
+    snippet_id: SnippetId,
+    name: String,
+    command: String,
+) -> Result<Workspace, String> {
     let mut workspace = state.workspace.lock().expect("lock poisoned");
     if let Some(snippet) = workspace.snippets.iter_mut().find(|s| s.id == snippet_id) {
         snippet.name = name;
@@ -295,7 +371,10 @@ pub fn update_snippet(state: State<'_, AppState>, snippet_id: SnippetId, name: S
 }
 
 #[tauri::command]
-pub fn delete_snippet(state: State<'_, AppState>, snippet_id: SnippetId) -> Result<Workspace, String> {
+pub fn delete_snippet(
+    state: State<'_, AppState>,
+    snippet_id: SnippetId,
+) -> Result<Workspace, String> {
     let mut workspace = state.workspace.lock().expect("lock poisoned");
     workspace.snippets.retain(|s| s.id != snippet_id);
     persist(&workspace)?;
@@ -314,7 +393,10 @@ pub struct AddForwardInput {
 }
 
 #[tauri::command]
-pub fn add_forward(state: State<'_, AppState>, input: AddForwardInput) -> Result<Workspace, String> {
+pub fn add_forward(
+    state: State<'_, AppState>,
+    input: AddForwardInput,
+) -> Result<Workspace, String> {
     let mut workspace = state.workspace.lock().expect("lock poisoned");
     workspace.port_forwards.push(PortForward {
         id: PortForwardId::new_v4(),
@@ -330,8 +412,15 @@ pub fn add_forward(state: State<'_, AppState>, input: AddForwardInput) -> Result
 }
 
 #[tauri::command]
-pub async fn delete_forward(state: State<'_, AppState>, forward_id: PortForwardId) -> Result<Workspace, String> {
-    let session = state.forwards.lock().expect("lock poisoned").remove(&forward_id);
+pub async fn delete_forward(
+    state: State<'_, AppState>,
+    forward_id: PortForwardId,
+) -> Result<Workspace, String> {
+    let session = state
+        .forwards
+        .lock()
+        .expect("lock poisoned")
+        .remove(&forward_id);
     if let Some(session) = session {
         session.active.stop(&session.connection).await;
     }

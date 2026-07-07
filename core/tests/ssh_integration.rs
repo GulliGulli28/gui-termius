@@ -7,9 +7,19 @@ use common::{ClientKey, TestSshd, test_host};
 use termius_core::model::{AuthMethod, Workspace};
 use termius_core::ssh;
 
-async fn run_command(workspace: &Workspace, host_id: termius_core::model::HostId, command: &str) -> String {
-    let connection = ssh::connect(workspace, host_id).await.expect("connect should succeed");
-    let mut channel = connection.target().channel_open_session().await.expect("open session channel");
+async fn run_command(
+    workspace: &Workspace,
+    host_id: termius_core::model::HostId,
+    command: &str,
+) -> String {
+    let connection = ssh::connect(workspace, host_id)
+        .await
+        .expect("connect should succeed");
+    let mut channel = connection
+        .target()
+        .channel_open_session()
+        .await
+        .expect("open session channel");
     channel.exec(true, command).await.expect("exec");
 
     let mut output = Vec::new();
@@ -17,7 +27,7 @@ async fn run_command(workspace: &Workspace, host_id: termius_core::model::HostId
         match channel.wait().await {
             Some(russh::ChannelMsg::Data { data }) => output.extend_from_slice(&data),
             Some(russh::ChannelMsg::ExitStatus { .. }) | None => break,
-            _ => {},
+            _ => {}
         }
     }
     String::from_utf8(output).unwrap()
@@ -44,7 +54,10 @@ async fn wrong_key_is_rejected() {
     let sshd = TestSshd::start("rejected", &key.public);
 
     let mut host = test_host(&sshd, &key, "test-reject");
-    host.auth = AuthMethod::PrivateKey { path: wrong_key.private.to_string_lossy().to_string(), key_id: None };
+    host.auth = AuthMethod::PrivateKey {
+        path: wrong_key.private.to_string_lossy().to_string(),
+        key_id: None,
+    };
     let host_id = host.id;
 
     let mut workspace = Workspace::default();
@@ -54,7 +67,10 @@ async fn wrong_key_is_rejected() {
         Ok(_) => panic!("auth with the wrong key must fail"),
         Err(err) => err,
     };
-    assert!(err.to_string().to_lowercase().contains("auth"), "unexpected error: {err}");
+    assert!(
+        err.to_string().to_lowercase().contains("auth"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
@@ -77,4 +93,3 @@ async fn bastion_chain_reaches_the_target() {
     let output = run_command(&workspace, target_id, "echo hello-through-bastion").await;
     assert_eq!(output.trim(), "hello-through-bastion");
 }
-

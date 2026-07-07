@@ -1,7 +1,7 @@
 //! SFTP file browsing over an established [`crate::ssh::Connection`].
 use crate::ssh::Connection;
-use russh_sftp::client::fs::Metadata;
 use russh_sftp::client::SftpSession;
+use russh_sftp::client::fs::Metadata;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -77,7 +77,10 @@ impl SftpClient {
     }
 
     pub async fn set_permissions(&self, path: &str, mode: u32) -> anyhow::Result<()> {
-        let attrs = Metadata { permissions: Some(mode), ..Default::default() };
+        let attrs = Metadata {
+            permissions: Some(mode),
+            ..Default::default()
+        };
         Ok(self.session.set_metadata(path, attrs).await?)
     }
 
@@ -89,7 +92,8 @@ impl SftpClient {
         let mut file = self.session.open(path).await?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await?;
-        String::from_utf8(buf).map_err(|_| anyhow::anyhow!("le fichier n'est pas du texte UTF-8 valide"))
+        String::from_utf8(buf)
+            .map_err(|_| anyhow::anyhow!("le fichier n'est pas du texte UTF-8 valide"))
     }
 
     /// Overwrites a remote file's entire content, for quick in-place editing.
@@ -197,5 +201,9 @@ pub fn join(base: &str, segment: &str) -> String {
             None => "/".to_string(),
         };
     }
-    if base.ends_with('/') { format!("{base}{segment}") } else { format!("{base}/{segment}") }
+    if base.ends_with('/') {
+        format!("{base}{segment}")
+    } else {
+        format!("{base}/{segment}")
+    }
 }

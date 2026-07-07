@@ -31,9 +31,18 @@ impl ActiveForward {
                     .remote_forward_routes()
                     .lock()
                     .expect("lock poisoned")
-                    .remove(&(self.config.bind_address.clone(), self.config.bind_port as u32));
-                let _ = connection.target().cancel_tcpip_forward(self.config.bind_address.clone(), self.config.bind_port as u32).await;
-            },
+                    .remove(&(
+                        self.config.bind_address.clone(),
+                        self.config.bind_port as u32,
+                    ));
+                let _ = connection
+                    .target()
+                    .cancel_tcpip_forward(
+                        self.config.bind_address.clone(),
+                        self.config.bind_port as u32,
+                    )
+                    .await;
+            }
         }
     }
 }
@@ -41,31 +50,50 @@ impl ActiveForward {
 /// `connection` is an `Arc` because local forwarding spawns a long-lived
 /// background task that keeps issuing channel opens on it; the `Arc` keeps
 /// the whole bastion chain alive for as long as that task runs.
-pub async fn start(connection: Arc<Connection>, forward: PortForward) -> anyhow::Result<ActiveForward> {
+pub async fn start(
+    connection: Arc<Connection>,
+    forward: PortForward,
+) -> anyhow::Result<ActiveForward> {
     match forward.kind {
         PortForwardKind::Local => start_local(connection, forward).await,
         PortForwardKind::Remote => start_remote(&connection, forward).await,
     }
 }
 
-async fn start_local(connection: Arc<Connection>, forward: PortForward) -> anyhow::Result<ActiveForward> {
+async fn start_local(
+    connection: Arc<Connection>,
+    forward: PortForward,
+) -> anyhow::Result<ActiveForward> {
     let listener = TcpListener::bind((forward.bind_address.as_str(), forward.bind_port))
         .await
-        .map_err(|e| anyhow::anyhow!("could not listen on {}:{}: {e}", forward.bind_address, forward.bind_port))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "could not listen on {}:{}: {e}",
+                forward.bind_address,
+                forward.bind_port
+            )
+        })?;
 
     let dest_address = forward.dest_address.clone();
     let dest_port = forward.dest_port;
 
     let accept_loop = tokio::spawn(async move {
         loop {
-            let Ok((stream, peer)) = listener.accept().await else { break };
+            let Ok((stream, peer)) = listener.accept().await else {
+                break;
+            };
             let connection = connection.clone();
             let dest_address = dest_address.clone();
             tokio::spawn(async move {
                 let mut stream = stream;
                 let channel = match connection
                     .target()
-                    .channel_open_direct_tcpip(dest_address, dest_port as u32, peer.ip().to_string(), peer.port() as u32)
+                    .channel_open_direct_tcpip(
+                        dest_address,
+                        dest_port as u32,
+                        peer.ip().to_string(),
+                        peer.port() as u32,
+                    )
                     .await
                 {
                     Ok(channel) => channel,
@@ -77,25 +105,50 @@ async fn start_local(connection: Arc<Connection>, forward: PortForward) -> anyho
         }
     });
 
-    Ok(ActiveForward { config: forward, kind: ActiveKind::Local(accept_loop) })
+    Ok(ActiveForward {
+        config: forward,
+        kind: ActiveKind::Local(accept_loop),
+    })
 }
 
-async fn start_remote(connection: &Connection, forward: PortForward) -> anyhow::Result<ActiveForward> {
+async fn start_remote(
+    connection: &Connection,
+    forward: PortForward,
+) -> anyhow::Result<ActiveForward> {
     let route_key = (forward.bind_address.clone(), forward.bind_port as u32);
 
     // Register the route *before* asking the server to forward: the server can start
     // pushing connections as soon as it acks the request, so inserting the mapping
     // first avoids a race where an early connection finds no route and gets dropped
     // (see `AppHandler::server_channel_open_forwarded_tcpip`).
-    connection.remote_forward_routes().lock().expect("lock poisoned").insert(
-        route_key.clone(),
-        (forward.dest_address.clone(), forward.dest_port as u32),
-    );
+    connection
+        .remote_forward_routes()
+        .lock()
+        .expect("lock poisoned")
+        .insert(
+            route_key.clone(),
+            (forward.dest_address.clone(), forward.dest_port as u32),
+        );
 
-    if let Err(e) = connection.target().tcpip_forward(forward.bind_address.clone(), forward.bind_port as u32).await {
-        connection.remote_forward_routes().lock().expect("lock poisoned").remove(&route_key);
-        anyhow::bail!("remote refused to forward {}:{}: {e}", forward.bind_address, forward.bind_port);
+    if let Err(e) = connection
+        .target()
+        .tcpip_forward(forward.bind_address.clone(), forward.bind_port as u32)
+        .await
+    {
+        connection
+            .remote_forward_routes()
+            .lock()
+            .expect("lock poisoned")
+            .remove(&route_key);
+        anyhow::bail!(
+            "remote refused to forward {}:{}: {e}",
+            forward.bind_address,
+            forward.bind_port
+        );
     }
 
-    Ok(ActiveForward { config: forward, kind: ActiveKind::Remote })
+    Ok(ActiveForward {
+        config: forward,
+        kind: ActiveKind::Remote,
+    })
 }

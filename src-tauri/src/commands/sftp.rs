@@ -1,7 +1,7 @@
 use crate::state::{AppState, Pane};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, State};
 use termius_core::model::HostId;
 use termius_core::sftp::{Entry, SftpClient};
@@ -28,24 +28,53 @@ pub struct PaneOpened {
 }
 
 #[tauri::command]
-pub async fn open_pane(state: State<'_, AppState>, source: PaneSource) -> Result<PaneOpened, String> {
+pub async fn open_pane(
+    state: State<'_, AppState>,
+    source: PaneSource,
+) -> Result<PaneOpened, String> {
     let pane_id = Uuid::new_v4().to_string();
     match source {
         PaneSource::Local => {
             let cwd = termius_core::local_fs::home_dir();
             let entries = termius_core::local_fs::list(&cwd).map_err(|e| e.to_string())?;
-            state.panes.lock().expect("lock poisoned").insert(pane_id.clone(), Pane { connection: None, client: None });
-            Ok(PaneOpened { pane_id, cwd, entries })
-        },
+            state.panes.lock().expect("lock poisoned").insert(
+                pane_id.clone(),
+                Pane {
+                    connection: None,
+                    client: None,
+                },
+            );
+            Ok(PaneOpened {
+                pane_id,
+                cwd,
+                entries,
+            })
+        }
         PaneSource::Remote { host_id } => {
             let workspace = state.workspace.lock().expect("lock poisoned").clone();
-            let connection = ssh::connect(&workspace, host_id).await.map_err(|e| e.to_string())?;
-            let client = Arc::new(SftpClient::open(&connection).await.map_err(|e| e.to_string())?);
+            let connection = ssh::connect(&workspace, host_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            let client = Arc::new(
+                SftpClient::open(&connection)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            );
             let cwd = client.home_dir().await.map_err(|e| e.to_string())?;
             let entries = client.list(&cwd).await.map_err(|e| e.to_string())?;
-            state.panes.lock().expect("lock poisoned").insert(pane_id.clone(), Pane { connection: Some(connection), client: Some(client) });
-            Ok(PaneOpened { pane_id, cwd, entries })
-        },
+            state.panes.lock().expect("lock poisoned").insert(
+                pane_id.clone(),
+                Pane {
+                    connection: Some(connection),
+                    client: Some(client),
+                },
+            );
+            Ok(PaneOpened {
+                pane_id,
+                cwd,
+                entries,
+            })
+        }
     }
 }
 
@@ -63,7 +92,9 @@ pub struct PaneListed {
 
 fn pane_ref(state: &AppState, pane_id: &str) -> Result<PaneRef, String> {
     let panes = state.panes.lock().expect("lock poisoned");
-    let pane = panes.get(pane_id).ok_or_else(|| "pane inconnu".to_string())?;
+    let pane = panes
+        .get(pane_id)
+        .ok_or_else(|| "pane inconnu".to_string())?;
     Ok(match &pane.client {
         Some(client) => PaneRef::Remote(client.clone()),
         None => PaneRef::Local,
@@ -71,9 +102,15 @@ fn pane_ref(state: &AppState, pane_id: &str) -> Result<PaneRef, String> {
 }
 
 #[tauri::command]
-pub async fn list_pane(state: State<'_, AppState>, pane_id: String, path: String) -> Result<PaneListed, String> {
+pub async fn list_pane(
+    state: State<'_, AppState>,
+    pane_id: String,
+    path: String,
+) -> Result<PaneListed, String> {
     let reference = pane_ref(&state, &pane_id)?;
-    let entries = transfer::list(&reference, &path).await.map_err(|e| e.to_string())?;
+    let entries = transfer::list(&reference, &path)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(PaneListed { cwd: path, entries })
 }
 
@@ -88,55 +125,115 @@ pub async fn copy_entry(
 ) -> Result<PaneListed, String> {
     let source = pane_ref(&state, &source_pane_id)?;
     let dest = pane_ref(&state, &dest_pane_id)?;
-    transfer::copy_entry(&source, &source_cwd, &entry, &dest, &dest_cwd).await.map_err(|e| e.to_string())?;
-    let entries = transfer::list(&dest, &dest_cwd).await.map_err(|e| e.to_string())?;
-    Ok(PaneListed { cwd: dest_cwd, entries })
+    transfer::copy_entry(&source, &source_cwd, &entry, &dest, &dest_cwd)
+        .await
+        .map_err(|e| e.to_string())?;
+    let entries = transfer::list(&dest, &dest_cwd)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(PaneListed {
+        cwd: dest_cwd,
+        entries,
+    })
 }
 
 #[tauri::command]
-pub async fn pane_mkdir(state: State<'_, AppState>, pane_id: String, cwd: String, name: String) -> Result<PaneListed, String> {
+pub async fn pane_mkdir(
+    state: State<'_, AppState>,
+    pane_id: String,
+    cwd: String,
+    name: String,
+) -> Result<PaneListed, String> {
     let reference = pane_ref(&state, &pane_id)?;
-    transfer::mkdir(&reference, &cwd, &name).await.map_err(|e| e.to_string())?;
-    let entries = transfer::list(&reference, &cwd).await.map_err(|e| e.to_string())?;
+    transfer::mkdir(&reference, &cwd, &name)
+        .await
+        .map_err(|e| e.to_string())?;
+    let entries = transfer::list(&reference, &cwd)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(PaneListed { cwd, entries })
 }
 
 #[tauri::command]
-pub async fn pane_rename(state: State<'_, AppState>, pane_id: String, cwd: String, old_name: String, new_name: String) -> Result<PaneListed, String> {
+pub async fn pane_rename(
+    state: State<'_, AppState>,
+    pane_id: String,
+    cwd: String,
+    old_name: String,
+    new_name: String,
+) -> Result<PaneListed, String> {
     let reference = pane_ref(&state, &pane_id)?;
-    transfer::rename(&reference, &cwd, &old_name, &new_name).await.map_err(|e| e.to_string())?;
-    let entries = transfer::list(&reference, &cwd).await.map_err(|e| e.to_string())?;
+    transfer::rename(&reference, &cwd, &old_name, &new_name)
+        .await
+        .map_err(|e| e.to_string())?;
+    let entries = transfer::list(&reference, &cwd)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(PaneListed { cwd, entries })
 }
 
 #[tauri::command]
-pub async fn pane_remove(state: State<'_, AppState>, pane_id: String, cwd: String, entry: Entry) -> Result<PaneListed, String> {
+pub async fn pane_remove(
+    state: State<'_, AppState>,
+    pane_id: String,
+    cwd: String,
+    entry: Entry,
+) -> Result<PaneListed, String> {
     let reference = pane_ref(&state, &pane_id)?;
-    transfer::remove(&reference, &cwd, &entry).await.map_err(|e| e.to_string())?;
-    let entries = transfer::list(&reference, &cwd).await.map_err(|e| e.to_string())?;
+    transfer::remove(&reference, &cwd, &entry)
+        .await
+        .map_err(|e| e.to_string())?;
+    let entries = transfer::list(&reference, &cwd)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(PaneListed { cwd, entries })
 }
 
 #[tauri::command]
-pub async fn pane_chmod(state: State<'_, AppState>, pane_id: String, cwd: String, name: String, mode: u32) -> Result<PaneListed, String> {
+pub async fn pane_chmod(
+    state: State<'_, AppState>,
+    pane_id: String,
+    cwd: String,
+    name: String,
+    mode: u32,
+) -> Result<PaneListed, String> {
     let reference = pane_ref(&state, &pane_id)?;
-    transfer::set_permissions(&reference, &cwd, &name, mode).await.map_err(|e| e.to_string())?;
-    let entries = transfer::list(&reference, &cwd).await.map_err(|e| e.to_string())?;
+    transfer::set_permissions(&reference, &cwd, &name, mode)
+        .await
+        .map_err(|e| e.to_string())?;
+    let entries = transfer::list(&reference, &cwd)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(PaneListed { cwd, entries })
 }
 
 /// Reads a small file's whole content for the quick-edit modal — no local temp
 /// file involved. Callers are expected to gate on file size before calling this.
 #[tauri::command]
-pub async fn read_pane_file(state: State<'_, AppState>, pane_id: String, cwd: String, name: String) -> Result<String, String> {
+pub async fn read_pane_file(
+    state: State<'_, AppState>,
+    pane_id: String,
+    cwd: String,
+    name: String,
+) -> Result<String, String> {
     let reference = pane_ref(&state, &pane_id)?;
-    transfer::read_text(&reference, &cwd, &name).await.map_err(|e| e.to_string())
+    transfer::read_text(&reference, &cwd, &name)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn write_pane_file(state: State<'_, AppState>, pane_id: String, cwd: String, name: String, content: String) -> Result<(), String> {
+pub async fn write_pane_file(
+    state: State<'_, AppState>,
+    pane_id: String,
+    cwd: String,
+    name: String,
+    content: String,
+) -> Result<(), String> {
     let reference = pane_ref(&state, &pane_id)?;
-    transfer::write_text(&reference, &cwd, &name, &content).await.map_err(|e| e.to_string())
+    transfer::write_text(&reference, &cwd, &name, &content)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Serialize, Clone)]
@@ -164,14 +261,24 @@ struct TransferErrorEvent {
 /// Returns one transfer id per file immediately; progress/completion is reported via
 /// `transfer-progress` / `transfer-done` / `transfer-error` events.
 #[tauri::command]
-pub async fn upload_paths(app: AppHandle, state: State<'_, AppState>, pane_id: String, cwd: String, local_paths: Vec<String>) -> Result<Vec<String>, String> {
+pub async fn upload_paths(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    pane_id: String,
+    cwd: String,
+    local_paths: Vec<String>,
+) -> Result<Vec<String>, String> {
     let reference = pane_ref(&state, &pane_id)?;
     let mut ids = Vec::with_capacity(local_paths.len());
 
     for local_path in local_paths {
         let transfer_id = Uuid::new_v4().to_string();
         let cancel_flag = Arc::new(AtomicBool::new(false));
-        state.transfers.lock().expect("lock poisoned").insert(transfer_id.clone(), cancel_flag.clone());
+        state
+            .transfers
+            .lock()
+            .expect("lock poisoned")
+            .insert(transfer_id.clone(), cancel_flag.clone());
         ids.push(transfer_id.clone());
 
         let reference = reference.clone();
@@ -180,12 +287,40 @@ pub async fn upload_paths(app: AppHandle, state: State<'_, AppState>, pane_id: S
         let id_for_task = transfer_id.clone();
 
         tokio::spawn(async move {
-            let result = upload_one(&reference, &cwd, &local_path, &id_for_task, &app_handle, &cancel_flag).await;
+            let result = upload_one(
+                &reference,
+                &cwd,
+                &local_path,
+                &id_for_task,
+                &app_handle,
+                &cancel_flag,
+            )
+            .await;
             match result {
-                Ok(()) => { let _ = app_handle.emit("transfer-done", TransferDoneEvent { transfer_id: id_for_task.clone() }); },
-                Err(e) => { let _ = app_handle.emit("transfer-error", TransferErrorEvent { transfer_id: id_for_task.clone(), message: e.to_string() }); },
+                Ok(()) => {
+                    let _ = app_handle.emit(
+                        "transfer-done",
+                        TransferDoneEvent {
+                            transfer_id: id_for_task.clone(),
+                        },
+                    );
+                }
+                Err(e) => {
+                    let _ = app_handle.emit(
+                        "transfer-error",
+                        TransferErrorEvent {
+                            transfer_id: id_for_task.clone(),
+                            message: e.to_string(),
+                        },
+                    );
+                }
             }
-            app_handle.state::<AppState>().transfers.lock().expect("lock poisoned").remove(&id_for_task);
+            app_handle
+                .state::<AppState>()
+                .transfers
+                .lock()
+                .expect("lock poisoned")
+                .remove(&id_for_task);
         });
     }
     Ok(ids)
@@ -200,27 +335,44 @@ async fn upload_one(
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
     let local = std::path::Path::new(local_path);
-    let name = local.file_name().map(|n| n.to_string_lossy().to_string()).ok_or_else(|| anyhow::anyhow!("chemin invalide"))?;
+    let name = local
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .ok_or_else(|| anyhow::anyhow!("chemin invalide"))?;
     match dest {
         PaneRef::Local => {
             let dest_path = termius_core::sftp::join(dest_cwd, &name);
             tokio::fs::copy(local, dest_path).await?;
             Ok(())
-        },
+        }
         PaneRef::Remote(client) => {
             let remote_path = termius_core::sftp::join(dest_cwd, &name);
             let transfer_id = transfer_id.to_string();
             let app = app.clone();
-            client.upload(local, &remote_path, cancel, move |done, total| {
-                let _ = app.emit("transfer-progress", TransferProgressEvent { transfer_id: transfer_id.clone(), bytes_done: done, bytes_total: total });
-            }).await
-        },
+            client
+                .upload(local, &remote_path, cancel, move |done, total| {
+                    let _ = app.emit(
+                        "transfer-progress",
+                        TransferProgressEvent {
+                            transfer_id: transfer_id.clone(),
+                            bytes_done: done,
+                            bytes_total: total,
+                        },
+                    );
+                })
+                .await
+        }
     }
 }
 
 #[tauri::command]
 pub fn cancel_transfer(state: State<'_, AppState>, transfer_id: String) -> Result<(), String> {
-    if let Some(flag) = state.transfers.lock().expect("lock poisoned").get(&transfer_id) {
+    if let Some(flag) = state
+        .transfers
+        .lock()
+        .expect("lock poisoned")
+        .get(&transfer_id)
+    {
         flag.store(true, Ordering::Relaxed);
     }
     Ok(())

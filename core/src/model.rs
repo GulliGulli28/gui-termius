@@ -51,11 +51,15 @@ pub struct CustomIcon {
 /// Deserialises `jumpVia` from old configs that stored a single UUID (or null)
 /// as well as the new array format.
 fn deser_jump_via<'de, D>(d: D) -> Result<Vec<HostId>, D::Error>
-where D: serde::Deserializer<'de>
+where
+    D: serde::Deserializer<'de>,
 {
     #[derive(Deserialize)]
     #[serde(untagged)]
-    enum Compat { One(HostId), Many(Vec<HostId>) }
+    enum Compat {
+        One(HostId),
+        Many(Vec<HostId>),
+    }
     Ok(match Option::<Compat>::deserialize(d)? {
         None => Vec::new(),
         Some(Compat::One(id)) => vec![id],
@@ -101,7 +105,11 @@ pub struct Host {
 }
 
 impl Host {
-    pub fn new(label: impl Into<String>, address: impl Into<String>, username: impl Into<String>) -> Self {
+    pub fn new(
+        label: impl Into<String>,
+        address: impl Into<String>,
+        username: impl Into<String>,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             label: label.into(),
@@ -192,7 +200,9 @@ impl Workspace {
 
     /// Resolves the bastion chain for a host: bastions first (in order), target last.
     pub fn jump_chain(&self, id: HostId) -> anyhow::Result<Vec<&Host>> {
-        let target = self.host(id).ok_or_else(|| anyhow::anyhow!("host {id} not found"))?;
+        let target = self
+            .host(id)
+            .ok_or_else(|| anyhow::anyhow!("host {id} not found"))?;
         let mut chain: Vec<&Host> = Vec::with_capacity(target.jump_via.len() + 1);
         let mut seen = std::collections::HashSet::new();
         seen.insert(id);
@@ -200,7 +210,10 @@ impl Workspace {
             if !seen.insert(jid) {
                 anyhow::bail!("duplicate bastion in chain");
             }
-            chain.push(self.host(jid).ok_or_else(|| anyhow::anyhow!("bastion {jid} not found"))?);
+            chain.push(
+                self.host(jid)
+                    .ok_or_else(|| anyhow::anyhow!("bastion {jid} not found"))?,
+            );
         }
         chain.push(target);
         Ok(chain)

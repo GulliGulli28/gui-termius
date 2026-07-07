@@ -136,11 +136,10 @@ pub fn list_local_shells() -> Vec<ShellInfo> {
         }
     } else {
         let mut seen = std::collections::HashSet::new();
-        if let Ok(current) = std::env::var("SHELL") {
-            if !current.is_empty() && seen.insert(current.clone()) {
-                let label = current.rsplit('/').next().unwrap_or(&current);
-                shells.push(ShellInfo { id: current.clone(), label: format!("{label} (courant)") });
-            }
+        if let Ok(current) = std::env::var("SHELL")
+            && !current.is_empty() && seen.insert(current.clone()) {
+            let label = current.rsplit('/').next().unwrap_or(&current);
+            shells.push(ShellInfo { id: current.clone(), label: format!("{label} (courant)") });
         }
         if let Ok(content) = std::fs::read_to_string("/etc/shells") {
             for line in content.lines() {

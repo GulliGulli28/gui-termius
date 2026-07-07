@@ -61,10 +61,9 @@ pub fn make_host_export(workspace: &Workspace, host_id: HostId, include_key_mate
     } else {
         None
     };
-    if !include_key_material {
-        if let Some(k) = keychain_key.as_mut() {
-            k.content = None;
-        }
+    if !include_key_material
+        && let Some(k) = keychain_key.as_mut() {
+        k.content = None;
     }
 
     let custom_icon = host.icon.as_deref()
@@ -134,15 +133,13 @@ pub fn import_host(workspace: &mut Workspace, export: HostExport) {
             workspace.snippets.push(snippet);
         }
     }
-    if let Some(key) = export.keychain_key {
-        if !workspace.keychain.iter().any(|k| k.id == key.id) {
-            workspace.keychain.push(key);
-        }
+    if let Some(key) = export.keychain_key
+        && !workspace.keychain.iter().any(|k| k.id == key.id) {
+        workspace.keychain.push(key);
     }
-    if let Some(icon) = export.custom_icon {
-        if !workspace.custom_icons.iter().any(|i| i.id == icon.id) {
-            workspace.custom_icons.push(icon);
-        }
+    if let Some(icon) = export.custom_icon
+        && !workspace.custom_icons.iter().any(|i| i.id == icon.id) {
+        workspace.custom_icons.push(icon);
     }
 
     if let Some(e) = workspace.hosts.iter_mut().find(|h| h.id == export.host.id) {

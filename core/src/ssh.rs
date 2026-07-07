@@ -55,17 +55,22 @@ impl AppHandler {
 impl client::Handler for AppHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, server_public_key: &PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKey,
+    ) -> Result<bool, Self::Error> {
         match known_hosts::check_and_trust(&self.identity, &self.label, server_public_key) {
             Ok(Verdict::AlreadyTrusted | Verdict::NewlyTrusted) => Ok(true),
-            Ok(Verdict::Mismatch { previous_fingerprint }) => {
+            Ok(Verdict::Mismatch {
+                previous_fingerprint,
+            }) => {
                 *self.host_key_mismatch.lock().expect("lock poisoned") = Some(HostKeyMismatch {
                     host_label: self.label.clone(),
                     previous_fingerprint,
                     offered_fingerprint: server_public_key.fingerprint(HashAlg::Sha256).to_string(),
                 });
                 Ok(false)
-            },
+            }
             Err(_) => Ok(false),
         }
     }
@@ -89,7 +94,9 @@ impl client::Handler for AppHandler {
             return Ok(());
         };
         tokio::spawn(async move {
-            let Ok(local) = tokio::net::TcpStream::connect((dest_address.as_str(), dest_port as u16)).await else {
+            let Ok(local) =
+                tokio::net::TcpStream::connect((dest_address.as_str(), dest_port as u16)).await
+            else {
                 return;
             };
             let mut local = local;
@@ -104,7 +111,11 @@ impl client::Handler for AppHandler {
     /// without them ever leaving this machine. Only requested in the first place
     /// when the connecting host has `agent_forward` enabled (see [`open_shell`]).
     #[cfg(unix)]
-    async fn server_channel_open_agent_forward(&mut self, channel: Channel<client::Msg>, _session: &mut client::Session) -> Result<(), Self::Error> {
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: Channel<client::Msg>,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
         let Ok(sock_path) = std::env::var("SSH_AUTH_SOCK") else {
             return Ok(());
         };
@@ -162,7 +173,10 @@ fn label_of(host: &Host) -> String {
 
 /// Builds a precise "host key changed" error if `mismatch` was populated during
 /// the handshake, otherwise falls back to `fallback` (the raw connect/handshake error).
-fn mismatch_error(mismatch: &Arc<Mutex<Option<HostKeyMismatch>>>, fallback: impl FnOnce() -> anyhow::Error) -> anyhow::Error {
+fn mismatch_error(
+    mismatch: &Arc<Mutex<Option<HostKeyMismatch>>>,
+    fallback: impl FnOnce() -> anyhow::Error,
+) -> anyhow::Error {
     match mismatch.lock().expect("lock poisoned").take() {
         Some(m) => anyhow::anyhow!(
             "la clé de l'hôte « {} » a changé : clé précédemment approuvée {}, clé reçue {}. \
@@ -178,19 +192,27 @@ fn mismatch_error(mismatch: &Arc<Mutex<Option<HostKeyMismatch>>>, fallback: impl
     }
 }
 
-async fn authenticate(handle: &mut client::Handle<AppHandler>, host: &Host, workspace: &Workspace) -> anyhow::Result<()> {
+async fn authenticate(
+    handle: &mut client::Handle<AppHandler>,
+    host: &Host,
+    workspace: &Workspace,
+) -> anyhow::Result<()> {
     let result = match &host.auth {
         AuthMethod::Password => {
             let password = vault::load(host.id, SecretKind::Password)?
                 .ok_or_else(|| anyhow::anyhow!("no stored password for '{}'", host.label))?;
-            handle.authenticate_password(host.username.clone(), password).await?
-        },
+            handle
+                .authenticate_password(host.username.clone(), password)
+                .await?
+        }
         AuthMethod::PrivateKey { path, key_id } => {
             let lookup_id = key_id.unwrap_or(host.id);
             let passphrase = vault::load(lookup_id, SecretKind::KeyPassphrase)?;
             // Prefer embedded key content (stored at import time) over reading the file from disk.
             let key = if let Some(kid) = *key_id {
-                if let Some(content) = workspace.keychain.iter()
+                if let Some(content) = workspace
+                    .keychain
+                    .iter()
                     .find(|k| k.id == kid)
                     .and_then(|k| k.content.as_deref())
                 {
@@ -211,16 +233,19 @@ async fn authenticate(handle: &mut client::Handle<AppHandler>, host: &Host, work
                     PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg),
                 )
                 .await?
-        },
+        }
         AuthMethod::Agent => return authenticate_with_agent(handle, host).await,
     };
     ensure_success(result, &host.label)
 }
 
 #[cfg(unix)]
-async fn authenticate_with_agent(handle: &mut client::Handle<AppHandler>, host: &Host) -> anyhow::Result<()> {
-    use russh::keys::agent::client::AgentClient;
+async fn authenticate_with_agent(
+    handle: &mut client::Handle<AppHandler>,
+    host: &Host,
+) -> anyhow::Result<()> {
     use russh::keys::agent::AgentIdentity;
+    use russh::keys::agent::client::AgentClient;
 
     let mut agent = AgentClient::connect_env()
         .await
@@ -248,19 +273,28 @@ async fn authenticate_with_agent(handle: &mut client::Handle<AppHandler>, host: 
 }
 
 #[cfg(not(unix))]
-async fn authenticate_with_agent(_handle: &mut client::Handle<AppHandler>, _host: &Host) -> anyhow::Result<()> {
+async fn authenticate_with_agent(
+    _handle: &mut client::Handle<AppHandler>,
+    _host: &Host,
+) -> anyhow::Result<()> {
     anyhow::bail!("ssh-agent authentication is only supported on Unix in this build")
 }
 
 fn ensure_success(result: AuthResult, host_label: &str) -> anyhow::Result<()> {
     match result {
         AuthResult::Success => Ok(()),
-        AuthResult::Failure { partial_success, .. } => {
+        AuthResult::Failure {
+            partial_success, ..
+        } => {
             anyhow::bail!(
                 "authentication failed for '{host_label}'{}",
-                if partial_success { " (partial success, more steps required)" } else { "" }
+                if partial_success {
+                    " (partial success, more steps required)"
+                } else {
+                    ""
+                }
             )
-        },
+        }
     }
 }
 
@@ -271,7 +305,12 @@ pub async fn connect(workspace: &Workspace, target: HostId) -> anyhow::Result<Co
     // Keepalive is configured off the *target* host only — bastions just relay bytes,
     // so what matters for keeping the interactive session alive is the last hop.
     let mut config = client::Config::default();
-    if let Some(secs) = chain.last().expect("chain is never empty").keepalive_interval_secs.filter(|&s| s > 0) {
+    if let Some(secs) = chain
+        .last()
+        .expect("chain is never empty")
+        .keepalive_interval_secs
+        .filter(|&s| s > 0)
+    {
         config.keepalive_interval = Some(Duration::from_secs(secs as u64));
     }
     let config = Arc::new(config);
@@ -279,12 +318,24 @@ pub async fn connect(workspace: &Workspace, target: HostId) -> anyhow::Result<Co
     let remote_forward_routes: RemoteForwardRoutes = Arc::new(Mutex::new(HashMap::new()));
 
     let first = chain[0];
-    let first_routes = if chain.len() == 1 { remote_forward_routes.clone() } else { Default::default() };
+    let first_routes = if chain.len() == 1 {
+        remote_forward_routes.clone()
+    } else {
+        Default::default()
+    };
     let first_handler = AppHandler::new(identity_of(first), label_of(first), first_routes);
     let first_mismatch = first_handler.host_key_mismatch.clone();
-    let mut handle = client::connect(config.clone(), (first.address.as_str(), first.port), first_handler)
-        .await
-        .map_err(|e| mismatch_error(&first_mismatch, || anyhow::anyhow!("could not reach '{}': {e}", first.label)))?;
+    let mut handle = client::connect(
+        config.clone(),
+        (first.address.as_str(), first.port),
+        first_handler,
+    )
+    .await
+    .map_err(|e| {
+        mismatch_error(&first_mismatch, || {
+            anyhow::anyhow!("could not reach '{}': {e}", first.label)
+        })
+    })?;
     authenticate(&mut handle, first, workspace).await?;
 
     let mut hops = vec![handle];
@@ -292,21 +343,37 @@ pub async fn connect(workspace: &Workspace, target: HostId) -> anyhow::Result<Co
         let is_target = i + 2 == chain.len();
         let previous = hops.last().expect("hops is never empty");
         let channel = previous
-            .channel_open_direct_tcpip(next.address.clone(), next.port as u32, "127.0.0.1".to_string(), 0)
+            .channel_open_direct_tcpip(
+                next.address.clone(),
+                next.port as u32,
+                "127.0.0.1".to_string(),
+                0,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("bastion could not reach '{}': {e}", next.label))?;
         let stream = channel.into_stream();
-        let routes = if is_target { remote_forward_routes.clone() } else { Default::default() };
+        let routes = if is_target {
+            remote_forward_routes.clone()
+        } else {
+            Default::default()
+        };
         let next_handler = AppHandler::new(identity_of(next), label_of(next), routes);
         let next_mismatch = next_handler.host_key_mismatch.clone();
         let mut next_handle = client::connect_stream(config.clone(), stream, next_handler)
             .await
-            .map_err(|e| mismatch_error(&next_mismatch, || anyhow::anyhow!("SSH handshake with '{}' failed: {e}", next.label)))?;
+            .map_err(|e| {
+                mismatch_error(&next_mismatch, || {
+                    anyhow::anyhow!("SSH handshake with '{}' failed: {e}", next.label)
+                })
+            })?;
         authenticate(&mut next_handle, next, workspace).await?;
         hops.push(next_handle);
     }
 
-    Ok(Connection { chain: hops, remote_forward_routes })
+    Ok(Connection {
+        chain: hops,
+        remote_forward_routes,
+    })
 }
 
 /// Input sent to an interactive remote shell.
@@ -327,7 +394,12 @@ pub struct ShellSession {
 /// is set, requests agent forwarding on the channel first — the actual bridging back to
 /// `SSH_AUTH_SOCK` happens in [`AppHandler::server_channel_open_agent_forward`] once the
 /// server opens its side of the forwarding channel.
-pub async fn open_shell(connection: &Connection, cols: u16, rows: u16, agent_forward: bool) -> anyhow::Result<ShellSession> {
+pub async fn open_shell(
+    connection: &Connection,
+    cols: u16,
+    rows: u16,
+    agent_forward: bool,
+) -> anyhow::Result<ShellSession> {
     let channel = connection.target().channel_open_session().await?;
     if agent_forward {
         channel.agent_forward(false).await?;
@@ -375,7 +447,10 @@ pub async fn open_shell(connection: &Connection, cols: u16, rows: u16, agent_for
         }
     });
 
-    Ok(ShellSession { input: input_tx, output: output_rx })
+    Ok(ShellSession {
+        input: input_tx,
+        output: output_rx,
+    })
 }
 
 /// Lightweight reachability check: a raw TCP connect attempt with a short timeout,
@@ -387,10 +462,15 @@ pub async fn open_shell(connection: &Connection, cols: u16, rows: u16, agent_for
 /// first hop is. So this probes the first hop in the jump chain (the entry
 /// bastion, or `host` itself when there's none) rather than the target directly.
 pub async fn probe(workspace: &Workspace, host_id: HostId) -> bool {
-    let Ok(chain) = workspace.jump_chain(host_id) else { return false };
+    let Ok(chain) = workspace.jump_chain(host_id) else {
+        return false;
+    };
     let first = chain[0];
-    tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect((first.address.as_str(), first.port)))
-        .await
-        .map(|r| r.is_ok())
-        .unwrap_or(false)
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::TcpStream::connect((first.address.as_str(), first.port)),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false)
 }

@@ -18,7 +18,11 @@ pub struct KnownHostEntry {
 pub fn list_known_hosts() -> Vec<KnownHostEntry> {
     known_hosts::list()
         .into_iter()
-        .map(|(identity, label, public_key)| KnownHostEntry { identity, label, public_key })
+        .map(|(identity, label, public_key)| KnownHostEntry {
+            identity,
+            label,
+            public_key,
+        })
         .collect()
 }
 
@@ -57,12 +61,15 @@ impl From<ssh_config::SshConfigHost> for SshConfigHostDto {
 pub fn preview_ssh_config_import(path: Option<String>) -> Result<Vec<SshConfigHostDto>, String> {
     let path = match path {
         Some(p) => std::path::PathBuf::from(p),
-        None => ssh_config::default_path().ok_or_else(|| "impossible de déterminer le dossier personnel".to_string())?,
+        None => ssh_config::default_path()
+            .ok_or_else(|| "impossible de déterminer le dossier personnel".to_string())?,
     };
     if !path.exists() {
         return Ok(Vec::new());
     }
-    ssh_config::parse(&path).map(|hosts| hosts.into_iter().map(Into::into).collect()).map_err(|e| e.to_string())
+    ssh_config::parse(&path)
+        .map(|hosts| hosts.into_iter().map(Into::into).collect())
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Deserialize)]
@@ -80,7 +87,10 @@ fn persist(workspace: &Workspace) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn import_ssh_config_hosts(state: State<'_, AppState>, selections: Vec<ImportSelection>) -> Result<Workspace, String> {
+pub fn import_ssh_config_hosts(
+    state: State<'_, AppState>,
+    selections: Vec<ImportSelection>,
+) -> Result<Workspace, String> {
     let mut workspace = state.workspace.lock().expect("lock poisoned");
     for sel in selections {
         let mut host = Host::new(sel.alias, sel.hostname, sel.user);

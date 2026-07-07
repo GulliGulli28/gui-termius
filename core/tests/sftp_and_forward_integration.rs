@@ -3,8 +3,8 @@
 mod common;
 
 use common::{ClientKey, TestSshd, test_host};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use termius_core::model::{PortForward, PortForwardKind, Workspace};
 use termius_core::{port_forward, sftp, ssh};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -21,8 +21,12 @@ async fn sftp_round_trip() {
     let mut workspace = Workspace::default();
     workspace.hosts.push(host);
 
-    let connection = ssh::connect(&workspace, host_id).await.expect("connect should succeed");
-    let client = sftp::SftpClient::open(&connection).await.expect("open sftp session");
+    let connection = ssh::connect(&workspace, host_id)
+        .await
+        .expect("connect should succeed");
+    let client = sftp::SftpClient::open(&connection)
+        .await
+        .expect("open sftp session");
 
     let home = client.home_dir().await.expect("home dir");
     let dir = sftp::join(&home, &format!("gui-termius-test-{}", Uuid::new_v4()));
@@ -32,7 +36,10 @@ async fn sftp_round_trip() {
     let local_src = std::env::temp_dir().join(format!("gui-termius-upload-{}.txt", Uuid::new_v4()));
     tokio::fs::write(&local_src, b"hello sftp").await.unwrap();
 
-    client.upload(&local_src, &remote_file, &AtomicBool::new(false), |_, _| {}).await.expect("upload");
+    client
+        .upload(&local_src, &remote_file, &AtomicBool::new(false), |_, _| {})
+        .await
+        .expect("upload");
 
     let entries = client.list(&dir).await.expect("list dir");
     assert_eq!(entries.len(), 1);
@@ -40,8 +47,18 @@ async fn sftp_round_trip() {
     assert!(!entries[0].is_dir);
     assert_eq!(entries[0].size, "hello sftp".len() as u64);
 
-    let local_dst = std::env::temp_dir().join(format!("gui-termius-download-{}.txt", Uuid::new_v4()));
-    client.download(&remote_file, &local_dst, entries[0].size, &AtomicBool::new(false), |_, _| {}).await.expect("download");
+    let local_dst =
+        std::env::temp_dir().join(format!("gui-termius-download-{}.txt", Uuid::new_v4()));
+    client
+        .download(
+            &remote_file,
+            &local_dst,
+            entries[0].size,
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .await
+        .expect("download");
     let downloaded = tokio::fs::read_to_string(&local_dst).await.unwrap();
     assert_eq!(downloaded, "hello sftp");
 
@@ -63,7 +80,11 @@ async fn local_port_forward_reaches_a_local_service() {
 
     let mut workspace = Workspace::default();
     workspace.hosts.push(host);
-    let connection = Arc::new(ssh::connect(&workspace, host_id).await.expect("connect should succeed"));
+    let connection = Arc::new(
+        ssh::connect(&workspace, host_id)
+            .await
+            .expect("connect should succeed"),
+    );
 
     // A trivial echo service "behind" the SSH server, reachable only via the tunnel.
     let echo_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -87,9 +108,13 @@ async fn local_port_forward_reaches_a_local_service() {
         dest_address: "127.0.0.1".to_string(),
         dest_port: echo_port,
     };
-    let active = port_forward::start(connection.clone(), forward).await.expect("start local forward");
+    let active = port_forward::start(connection.clone(), forward)
+        .await
+        .expect("start local forward");
 
-    let mut client = TcpStream::connect(("127.0.0.1", local_bind_port)).await.expect("connect to forwarded port");
+    let mut client = TcpStream::connect(("127.0.0.1", local_bind_port))
+        .await
+        .expect("connect to forwarded port");
     client.write_all(b"ping").await.unwrap();
     let mut buf = [0u8; 4];
     client.read_exact(&mut buf).await.unwrap();
@@ -107,14 +132,20 @@ async fn remote_port_forward_reaches_a_local_service() {
 
     let mut workspace = Workspace::default();
     workspace.hosts.push(host);
-    let connection = Arc::new(ssh::connect(&workspace, host_id).await.expect("connect should succeed"));
+    let connection = Arc::new(
+        ssh::connect(&workspace, host_id)
+            .await
+            .expect("connect should succeed"),
+    );
 
     // A trivial echo service on "our" side, reachable from the SSH server via -R.
     let echo_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let echo_port = echo_listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         loop {
-            let Ok((mut stream, _)) = echo_listener.accept().await else { break };
+            let Ok((mut stream, _)) = echo_listener.accept().await else {
+                break;
+            };
             tokio::spawn(async move {
                 let mut buf = [0u8; 64];
                 if let Ok(n) = stream.read(&mut buf).await {
@@ -134,10 +165,16 @@ async fn remote_port_forward_reaches_a_local_service() {
         dest_address: "127.0.0.1".to_string(),
         dest_port: echo_port,
     };
-    let active = port_forward::start(connection.clone(), forward).await.expect("start remote forward");
+    let active = port_forward::start(connection.clone(), forward)
+        .await
+        .expect("start remote forward");
 
     // Ask the *sshd* itself to connect to the port it is now forwarding for us.
-    let mut probe = connection.target().channel_open_direct_tcpip("127.0.0.1", remote_bind_port as u32, "127.0.0.1", 0).await.expect("probe channel");
+    let mut probe = connection
+        .target()
+        .channel_open_direct_tcpip("127.0.0.1", remote_bind_port as u32, "127.0.0.1", 0)
+        .await
+        .expect("probe channel");
     probe.data(&b"pong"[..]).await.unwrap();
 
     let mut received = Vec::new();
@@ -148,9 +185,9 @@ async fn remote_port_forward_reaches_a_local_service() {
                 if received.len() >= 4 {
                     break;
                 }
-            },
+            }
             Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => break,
-            _ => {},
+            _ => {}
         }
     }
     assert_eq!(received, b"pong");

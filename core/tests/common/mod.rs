@@ -14,11 +14,17 @@ pub struct TestSshd {
 
 impl TestSshd {
     pub fn start(name: &str, client_pubkey_path: &Path) -> Self {
-        let dir = std::env::temp_dir().join(format!("gui-termius-test-{name}-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("gui-termius-test-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let host_key = dir.join("host_key");
-        run_ok(Command::new("ssh-keygen").args(["-t", "ed25519", "-f"]).arg(&host_key).args(["-N", ""]));
+        run_ok(
+            Command::new("ssh-keygen")
+                .args(["-t", "ed25519", "-f"])
+                .arg(&host_key)
+                .args(["-N", ""]),
+        );
 
         let authorized_keys = dir.join("authorized_keys");
         std::fs::copy(client_pubkey_path, &authorized_keys).unwrap();
@@ -70,12 +76,20 @@ impl Drop for TestSshd {
 }
 
 pub fn run_ok(cmd: &mut Command) {
-    let status = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status().expect("failed to run command");
+    let status = cmd
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("failed to run command");
     assert!(status.success(), "command failed: {cmd:?}");
 }
 
 pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 pub struct ClientKey {
@@ -86,12 +100,24 @@ pub struct ClientKey {
 
 impl ClientKey {
     pub fn generate() -> Self {
-        let dir = std::env::temp_dir().join(format!("gui-termius-test-clientkey-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "gui-termius-test-clientkey-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let private = dir.join("id_ed25519");
-        run_ok(Command::new("ssh-keygen").args(["-t", "ed25519", "-f"]).arg(&private).args(["-N", ""]));
+        run_ok(
+            Command::new("ssh-keygen")
+                .args(["-t", "ed25519", "-f"])
+                .arg(&private)
+                .args(["-N", ""]),
+        );
         let public = dir.join("id_ed25519.pub");
-        Self { dir, private, public }
+        Self {
+            dir,
+            private,
+            public,
+        }
     }
 }
 
@@ -102,12 +128,17 @@ impl Drop for ClientKey {
 }
 
 pub fn current_username() -> String {
-    std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).expect("no USER/LOGNAME in environment")
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .expect("no USER/LOGNAME in environment")
 }
 
 pub fn test_host(sshd: &TestSshd, key: &ClientKey, label: &str) -> termius_core::model::Host {
     let mut host = termius_core::model::Host::new(label, "127.0.0.1", current_username());
     host.port = sshd.port;
-    host.auth = termius_core::model::AuthMethod::PrivateKey { path: key.private.to_string_lossy().to_string(), key_id: None };
+    host.auth = termius_core::model::AuthMethod::PrivateKey {
+        path: key.private.to_string_lossy().to_string(),
+        key_id: None,
+    };
     host
 }
