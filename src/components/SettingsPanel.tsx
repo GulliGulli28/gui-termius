@@ -329,6 +329,17 @@ export function SettingsPanel({ workspace, onWorkspaceUpdate, onError, preferenc
               <span style={{ color: TERMINAL_THEMES[preferences.terminalThemeName]?.theme.green }}>✓</span>
               {" "}Aperçu du thème
             </div>
+
+            <div className="space-y-1 rounded-lg bg-[var(--c-bg2)] p-1.5">
+              <ToggleRow
+                label="Copier/coller au clic droit"
+                checked={preferences.terminalRightClickMenu}
+                onChange={(v) => onPreferencesChange({ ...preferences, terminalRightClickMenu: v })}
+              />
+              <p className="px-2 pb-1 text-[12px] leading-relaxed text-[var(--c-text-muted)]">
+                Clic droit avec une sélection : copie le texte sélectionné. Clic droit sans sélection : colle le presse-papiers.
+              </p>
+            </div>
           </section>
         )}
 

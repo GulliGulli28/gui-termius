@@ -1,8 +1,9 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type MouseEvent } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api, base64ToBytes, bytesToBase64, onTerminalClosed, onTerminalData } from "../lib/api";
 import type { Host } from "../lib/types";
 import type { AppPreferences } from "../lib/preferences";
@@ -173,8 +174,26 @@ export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(funct
     else searchRef.current?.findPrevious(value, { incremental: true });
   };
 
+  const handleContextMenu = (e: MouseEvent) => {
+    if (!preferences?.terminalRightClickMenu) return;
+    e.preventDefault();
+    const term = termRef.current;
+    const id = sessionIdRef.current;
+    if (term?.hasSelection()) {
+      const selection = term.getSelection();
+      writeText(selection).catch(() => {});
+      term.clearSelection();
+      term.focus();
+    } else if (id) {
+      readText().then((text) => {
+        if (text) api.writeTerminal(id, bytesToBase64(new TextEncoder().encode(text)));
+      }).catch(() => {});
+      term?.focus();
+    }
+  };
+
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col p-2" style={{ background: auroraLayerBackground(bgColor) }}>
+    <div className="relative flex min-h-0 flex-1 flex-col p-2" style={{ background: auroraLayerBackground(bgColor) }} onContextMenu={handleContextMenu}>
       {status === "connecting" && <div className="absolute inset-0 flex items-center justify-center text-[var(--c-text-secondary)]">Connexion à {host.label}…</div>}
       {status === "failed" && <div className="absolute inset-0 flex items-center justify-center px-8 text-center text-rose-300">Échec de connexion : {error}</div>}
       {searchOpen && <TerminalSearchBar onSearch={handleSearch} onClose={() => { setSearchOpen(false); termRef.current?.focus(); }} />}

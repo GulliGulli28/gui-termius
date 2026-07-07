@@ -83,6 +83,7 @@ export interface AppPreferences {
   notifyOnTransferDone: boolean;
   keyboardShortcuts: Record<string, string>;
   restoreTabsOnLaunch: boolean;
+  terminalRightClickMenu: boolean;
 }
 
 export interface TerminalThemeEntry {
@@ -236,6 +237,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   notifyOnTransferDone: true,
   keyboardShortcuts: defaultShortcuts(),
   restoreTabsOnLaunch: true,
+  terminalRightClickMenu: true,
 };
 
 // Same two-stop aurora wash as `.app-aurora-bg` in index.css, but layered over

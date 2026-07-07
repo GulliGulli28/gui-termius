@@ -17,6 +17,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(app_state)
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
