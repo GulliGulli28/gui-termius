@@ -9,6 +9,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:e2e": "node scripts/e2e-run.mjs",
     "tauri": "tauri",
     "bump-version": "node scripts/bump-version.mjs"
   },
@@ -39,6 +40,7 @@
     "tailwindcss": "^3.4.19",
     "typescript": "^6.0.3",
     "vite": "^5.4.21",
-    "vitest": "^2.1.9"
+    "vitest": "^2.1.9",
+    "webdriverio": "^9.29.1"
   }
 }

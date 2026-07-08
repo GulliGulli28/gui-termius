@@ -26,75 +26,162 @@ Découpage du code Rust :
 
 ## Environnement de dev (important)
 
-Le dépôt est monté depuis WSL (`\\wsl.localhost\Ubuntu-24.04\...`), mais **cargo
-n'est pas dans le PATH côté Windows** dans cet environnement — seul `npm`/`node`
-Windows natifs le sont. Pour tout ce qui touche Rust (`cargo check`, `cargo
-build`, tests), passer par WSL explicitement :
+Le dépôt est monté depuis WSL (`\\wsl.localhost\Ubuntu-24.04\...`). Pour de la
+vérification rapide (`cargo check`, `cargo test`, `tsc`, `npm run build`),
+passer par WSL explicitement — c'est l'environnement Rust "par défaut" de ce
+projet (`termius-core` y tourne ses tests d'intégration, qui ont besoin d'un
+vrai `sshd` Unix) :
 
 ```bash
 wsl.exe -e bash -lc "cd ~/gui-termius/src-tauri && cargo check"
 ```
 
+**Rust existe aussi nativement sur Windows sur cette machine** (rustup, MSVC
+Build Tools 2026, WebView2 Runtime — tous déjà installés), mais `cargo`/
+`rustc`/`tauri-driver` ne sont **pas sur le PATH d'une session PowerShell
+fraîche** : soit invoquer par chemin complet
+(`$env:USERPROFILE\.cargo\bin\cargo.exe`), soit ajouter au PATH de la session
+(`$env:PATH += ";$env:USERPROFILE\.cargo\bin"`) — ne pas conclure « cargo
+n'est pas installé côté Windows » juste parce que `Get-Command cargo` échoue.
+C'est nécessaire pour le pipeline E2E WebView2 (section suivante), qui doit
+tourner nativement sous Windows (WebView2 n'existe pas sous Linux).
+
 Le frontend (`npm`, `npx tsc`, `vite build`) peut tourner indifféremment côté
-Windows natif ou via ce même mécanisme `wsl.exe -e bash -lc "cd ~/gui-termius && ..."`
-— rester cohérent sur un seul des deux pour un même enchaînement de commandes
-évite les surprises de cache/`node_modules` dupliqués.
+Windows natif ou via WSL — mais **jamais mélanger les deux pour le même
+`node_modules`** : `npm install` choisit des binaires natifs par plateforme
+(`esbuild`, `rollup`...) au moment de l'install, donc un `node_modules`
+installé sous WSL ne fait pas tourner Vite nativement sous Windows (et
+inversement). Ce dépôt n'a qu'un seul `node_modules`, installé côté WSL —
+rester cohérent là-dessus pour un même enchaînement de commandes évite les
+surprises de cache dupliqué ou d'échecs de résolution de binaire natif.
 
-Il n'y a pas de moyen de piloter l'interface graphique réelle dans cet
-environnement (pas de `tauri dev` interactif, pas de captures d'écran). La
-vérification d'un changement se limite donc à : `cargo check` (+ `--tests` si
-la modif touche des structs partagées), `npx tsc --noEmit`, `npm run build`.
-Le dire explicitement à l'utilisateur plutôt que de laisser croire à un test
-fonctionnel réel — voir le skill `verify` pour la nuance entre les deux.
+**Accès écran réel : oui, via WSLg.** Ce WSL a un vrai serveur X actif
+(`DISPLAY=:0`, `xdpyinfo`/`xrandr` répondent, résolution réelle détectée) —
+voir la section suivante, ce n'est plus une limitation de cet environnement
+depuis le 2026-07-07 (une session précédente l'affirmait à tort ; corrigé
+après avoir effectivement lancé l'app et pris une vraie capture).
 
-## Tester réellement l'app, pas juste la compiler
+## Tests E2E réels — OBLIGATOIRE avant de clore une tâche UI/terminal
 
-`cargo check` / `tsc --noEmit` / `npm run build` prouvent que le code compile,
-pas qu'une fonctionnalité marche. Si une session future dispose d'un accès
-écran (contrairement à celle-ci, voir plus haut), voici comment vérifier pour
-de vrai plutôt que de s'arrêter à la compilation :
+`cargo check` / `tsc --noEmit` / `npm run build` prouvent que le code
+compile, pas qu'une fonctionnalité marche. Pour toute tâche qui touche à un
+composant React, un terminal (`TerminalTab`/`LocalTerminalTab`), une
+interaction clavier/souris, ou tout chemin passant par `invoke(...)`, il ne
+suffit **pas** de s'arrêter à la compilation : lancer
+**`npm run test:e2e`** (voir `scripts/e2e-run.mjs`) fait partie intégrante de
+la vérification, au même titre que `cargo check`/`tsc` — pas une étape
+optionnelle réservée à « si j'ai le temps ». Si la commande échoue ou que le
+setup manque, le dire explicitement plutôt que de conclure sur la seule
+compilation.
 
-- **Lancer l'app réellement** : `npm run tauri dev` ouvre la fenêtre native
-  (WebView2). C'est la seule façon de voir fonctionner quoi que ce soit qui
-  passe par `invoke(...)` — c'est-à-dire à peu près toute fonctionnalité
-  utile (connexion SSH, SFTP, trousseau, terminaux...). Utiliser le skill
-  `run` s'il est disponible : il sait déjà lancer un projet Tauri et prendre
-  le relais pour piloter/observer la fenêtre.
-- **Puppeteer/Playwright ne fonctionnent pas ici comme sur un site web.**
-  Pointer un de ces outils sur `http://localhost:1420` (le serveur Vite,
-  lancé par `npm run dev` seul) charge bien le frontend, mais tout ce qui
-  appelle `invoke()` échoue silencieusement ou plante : l'objet `__TAURI__`
-  n'existe que dans la vraie webview Tauri, pas dans un Chrome/Chromium
-  classique. Concrètement, ça permet de vérifier une mise en page ou un état
-  purement visuel (thèmes, disposition), mais pas une connexion SSH, du SFTP,
-  un terminal, le trousseau, etc. Ne pas perdre de temps à déboguer des
-  erreurs `invoke is not a function` dans ce contexte : c'est normal, changer
-  d'approche plutôt que de contourner.
-- **Pour du vrai bout-en-bout automatisé** sur une fenêtre Tauri, l'outil
-  officiel est [`tauri-driver`](https://tauri.app/develop/tests/webdriver/)
-  (protocole WebDriver, comme Selenium) — pas Puppeteer. Il n'est pas
-  installé dans ce dépôt aujourd'hui ; si l'utilisateur veut de vrais tests
-  E2E automatisés, ce serait le point de départ (nouvelle dépendance à
-  ajouter, pas quelque chose à improviser en une réponse).
-- **Captures d'écran** : si l'environnement d'exécution permet de piloter le
-  bureau (outil de capture d'écran, contrôle souris/clavier au niveau OS),
-  une capture après avoir lancé `npm run tauri dev` est plus fiable qu'une
-  déduction à partir des logs — utile en particulier pour tout ce qui touche
-  au rendu (thèmes, drag-and-drop, disposition du split, popovers).
-- Utiliser le skill `verify` pour la méthodologie générale (driver le
-  changement de bout en bout plutôt que de se fier aux seuls tests/typecheck)
-  et le distinguo à faire à l'utilisateur entre « ça compile » et « ça
-  marche ».
-- Si aucun accès écran n'est disponible (le cas dans cette session), le dire
-  explicitement plutôt que de laisser croire à un test fonctionnel réel.
+Ce que fait `npm run test:e2e` : il démarre `tauri-driver` (et Vite si besoin,
+voir plus bas), pilote le **vrai binaire compilé** via le protocole WebDriver,
+vérifie que la fenêtre s'ouvre, que React a bien monté (`#root`), prend une
+vraie capture d'écran (`scripts/.output/e2e-smoke.png`, gitignored) puis
+nettoie tous les processus qu'il a lancés. Contrairement à Puppeteer/
+Playwright pointé sur `http://localhost:1420` (qui ne voit jamais
+`window.__TAURI__` — un vrai navigateur n'est pas une webview Tauri), ceci
+exécute du vrai code `invoke(...)`. Le script (`scripts/e2e-run.mjs`) est
+**cross-platform** et détecte l'environnement d'exécution :
 
-### Ce qu'on peut réellement valider sans accès écran (sans se mentir)
+|                    | Linux (WSLg)                    | Windows natif                          |
+|--------------------|----------------------------------|-----------------------------------------|
+| Rendu               | WebKitGTK                       | **WebView2** (ce que les utilisateurs lancent réellement) |
+| Pilote natif        | `WebKitWebDriver`               | `msedgedriver.exe`                      |
+| Build testé         | debug (`cargo build`)           | release (`cargo build --release --features tauri/custom-protocol`) |
+| Sert le frontend via| Vite dev server (`devUrl`)      | `dist/` embarqué dans le binaire (`frontendDist`) |
 
-Deux techniques, mises en place et vérifiées avec succès le 2026-07-07 en
-développant les suggestions de commandes (ghost-text) des terminaux locaux,
-comblent une partie — mais pas la totalité — du trou entre « ça compile » et
-« ça marche » quand aucun accès écran/souris/clavier au niveau OS n'est
-disponible :
+Les deux ont été validés avec succès le 2026-07-07 — voir les pièges
+ci-dessous pour la mise en place, non triviale sur les deux plateformes.
+
+**Setup one-time Linux/WSL (déjà fait sur cette machine)** :
+```bash
+wsl.exe -e bash -lc "sudo apt-get update && sudo apt-get install -y webkit2gtk-driver scrot"
+wsl.exe -e bash -lc "cd ~/gui-termius && cargo install tauri-driver"
+wsl.exe -e bash -lc "cd ~/gui-termius/src-tauri && cargo build"
+```
+`sudo` n'a pas d'accès non-interactif dans ce WSL (voir piège plus bas) — si
+ce setup doit être refait, demander à l'utilisateur de lancer la commande
+`apt-get` lui-même via le préfixe `!`.
+
+**Setup one-time Windows (déjà fait sur cette machine)** — piloté depuis
+PowerShell, jamais `wsl.exe` pour cette partie :
+```powershell
+# Rust : déjà installé sur cette machine (rustup), juste absent du PATH de
+# session — toujours invoquer via le chemin complet ou ajouter au PATH :
+$env:PATH += ";$env:USERPROFILE\.cargo\bin;C:\Program Files\NASM"
+
+winget install --id NASM.NASM -e --accept-package-agreements --accept-source-agreements
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" install tauri-driver
+
+# msedgedriver DOIT correspondre exactement à la version du WebView2 Runtime installé :
+$wv2 = (Get-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}").pv
+curl.exe -sL "https://msedgedriver.microsoft.com/$wv2/edgedriver_win64.zip" -o "$env:TEMP\ed.zip"
+Expand-Archive "$env:TEMP\ed.zip" "$env:USERPROFILE\edgedriver" -Force
+
+# Build release, sur un chemin NTFS natif (pas le chemin UNC du dépôt WSL) :
+$env:CARGO_TARGET_DIR = "$env:USERPROFILE\gui-termius-target-windows"
+Set-Location "\\wsl.localhost\Ubuntu-24.04\home\glorin\gui-termius\src-tauri"
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" build --release --features tauri/custom-protocol
+```
+MSVC Build Tools et le WebView2 Runtime étaient déjà présents sur cette
+machine (`vswhere.exe` pour vérifier, `winget` pour installer sinon).
+
+**Avant de lancer `npm run test:e2e`**, s'assurer que le binaire correspondant
+à la plateforme existe et est à jour (commandes ci-dessus). Depuis Windows,
+définir `$env:CARGO_TARGET_DIR` avant de lancer le script (même valeur qu'au
+build) pour qu'il retrouve le bon binaire, et invoquer `node scripts\e2e-run.mjs`
+directement plutôt que `npm run test:e2e` (voir piège `npm`/UNC ci-dessous).
+
+Pour étendre la couverture E2E : ajouter des scénarios dans la fonction
+`runScenarios()` de `scripts/e2e-run.mjs` (ex. taper dans un terminal local et
+vérifier qu'une suggestion apparaît) plutôt que d'écrire un nouveau script
+séparé à chaque fois — le même scénario tourne sur les deux plateformes sans
+modification.
+
+**Pièges Windows rencontrés en mettant ça en place (dans l'ordre où ils
+mordent)** :
+- **`aws-lc-sys` a besoin de NASM** pour compiler ses routines assembleur sous
+  MSVC — `cargo build` échoue avec `NASM command not found` sinon
+  (`winget install NASM.NASM`, puis ajouter `C:\Program Files\NASM` au PATH
+  de la session).
+- **Lock file de compilation incrémentale impossible à créer sur un chemin
+  UNC** (`\\wsl.localhost\...`) — `cargo build` échoue avec `could not create
+  session directory lock file: Fonction incorrecte`. Fixé en pointant
+  `CARGO_TARGET_DIR` vers un chemin NTFS natif (`$env:USERPROFILE\...`) ; le
+  code source reste lu depuis le chemin UNC sans problème, seul le
+  répertoire de build doit être natif.
+- **`npm run ...` échoue sur un `cwd` UNC** : `npm` passe par `cmd.exe`, qui
+  ne supporte pas les chemins UNC comme répertoire courant (retombe
+  silencieusement sur `C:\Windows` et ne trouve plus rien). Contournement
+  dans `scripts/e2e-run.mjs` : invoquer `node.exe` directement sur les
+  fichiers `.js` (`node_modules/vite/bin/vite.js`, `scripts/e2e-run.mjs`
+  lui-même) plutôt que passer par les shims `.cmd` (`npx`, `npm run`).
+- **Un `node_modules` installé via WSL ne peut pas faire tourner Vite
+  nativement sous Windows** : `esbuild` (et d'autres) livrent un binaire
+  natif par plateforme, choisi à l'installation — seul le binaire Linux a été
+  installé. Plutôt que dupliquer `node_modules` pour Windows, contourné en
+  testant un **build release** côté Windows : `frontendDist` (le contenu de
+  `dist/`, déjà construit via WSL) est purement statique donc portable, alors
+  que la tooling de build (`node_modules`) ne l'est pas.
+- **`cargo build --release` seul ne suffit PAS à embarquer `frontendDist`** —
+  contre-intuitif : le binaire continue de charger `devUrl`
+  (`http://localhost:1420`, échec silencieux si rien n'écoute dessus) même en
+  release. Il manque le feature flag Cargo `custom-protocol` sur la
+  dépendance `tauri`, que la CLI `tauri build` active automatiquement mais
+  qu'un `cargo build` direct n'active jamais (`tauri = { features = [] }`
+  dans `Cargo.toml`). Fix : `cargo build --release --features
+  tauri/custom-protocol`. Diagnostiqué en interrogeant `getUrl()` via
+  WebDriver pendant la session (montrait `http://localhost:1420/` malgré le
+  build release) plutôt qu'en devinant.
+
+### Techniques plus légères, sans lancer l'app entière
+
+Pour itérer plus vite qu'un cycle `test:e2e` complet (qui recompile/relance
+une vraie fenêtre), deux techniques plus légères, mises en place et
+vérifiées avec succès le 2026-07-07 en développant les suggestions de
+commandes (ghost-text) des terminaux locaux, restent utiles en complément
+(pas en remplacement) du test E2E :
 
 - **Tests unitaires (`npm run test`, vitest)** pour toute la logique pure
   découplée de React/xterm/Tauri — typiquement un état de type "buffer de
@@ -141,9 +228,9 @@ disponible :
 Ce que ces deux techniques ne couvrent toujours **pas** : tout ce qui passe
 par `invoke(...)` (connexion SSH réelle, PTY local, trousseau, SFTP...) —
 `window.__TAURI__` n'existe que dans la vraie webview Tauri, jamais dans un
-Chromium/Playwright classique, headless ou non. Pour ça, la seule voie reste
-`tauri dev` avec un accès écran réel, ou `tauri-driver` en E2E (toujours pas
-installé dans ce dépôt à cette date).
+Chromium/Playwright classique, headless ou non. C'est exactement ce que
+`npm run test:e2e` (section précédente) couvre — l'utiliser dès qu'une
+commande `invoke(...)` réelle doit être exercée, pas seulement son DOM.
 
 ## Pièges déjà rencontrés (pour ne pas les redécouvrir)
 
@@ -188,6 +275,40 @@ installé dans ce dépôt à cette date).
   un struct Rust sérialisé dans le workspace (`Host`, `Group`, `Snippet`, …)
   doit être `#[serde(default)]` (ou `Option<T>` avec default) pour rester
   compatible avec les fichiers déjà sauvegardés par les utilisateurs existants.
+
+- **`sudo` dans ce WSL n'a pas d'accès non-interactif.** Toute commande qui
+  invoque `sudo` (directement, ou en cascade via `npx playwright install
+  --with-deps`) reste bloquée indéfiniment sur un prompt de mot de passe qui
+  n'arrivera jamais — silence total, 0% CPU, aucune sortie : c'est le
+  symptôme caractéristique, pas une commande lente. Ne pas attendre plus
+  longtemps en espérant que ça débloque. Tuer le processus bloqué (`kill -9`,
+  pas `sudo pkill` qui a le même problème) et demander à l'utilisateur de
+  lancer la commande `sudo` lui-même via le préfixe `!`.
+
+- **Un process lancé en arrière-plan via `wsl.exe -e bash -lc "cmd &"` meurt
+  dès que cet appel `wsl.exe` se termine** (même avec `nohup`) — ce n'est PAS
+  un process persistant. Pour un serveur de longue durée (Vite, tauri-driver,
+  un serveur de test), utiliser le paramètre `run_in_background: true` de
+  l'outil Bash lui-même sur la commande *au premier plan* (sans `&` interne)
+  — c'est ce mécanisme, pas un `&` shell, qui garde le process vivant entre
+  deux appels d'outil.
+
+- **GTK sous WSLg rend en Wayland natif par défaut, invisible pour les outils
+  X11** (`scrot`, `xwininfo`, et le pilote `WebKitWebDriver` utilisé pour les
+  tests E2E). La fenêtre existe et le process tourne, mais n'apparaît dans
+  aucun arbre de fenêtres X11 et un screenshot X11 classique donne un écran
+  noir. Forcer `GDK_BACKEND=x11` (en plus de `DISPLAY=:0`) dans l'environnement
+  du process pour que la fenêtre soit une vraie fenêtre XWayland pilotable —
+  `scripts/e2e-run.mjs` le fait déjà pour Vite et `tauri-driver`.
+
+- **Le binaire Tauri charge `build.devUrl` (`http://localhost:1420`) par
+  défaut, y compris en `--release`** — seul le feature flag Cargo
+  `tauri/custom-protocol` (activé automatiquement par la CLI `tauri build`,
+  jamais par un `cargo build` direct) fait basculer sur `frontendDist`
+  embarqué. Sans serveur Vite qui tourne en parallèle et sans ce feature, la
+  fenêtre affiche juste « Could not connect to localhost » — ce n'est pas un
+  bug de l'app. Détail complet et commande exacte dans la section « Tests E2E
+  réels » ci-dessus (piège `custom-protocol`).
 
 ## Habitudes de collaboration sur ce projet
 

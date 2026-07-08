@@ -1,9 +1,12 @@
 name: Release
 
-# Builds the Windows installer and publishes it as a draft GitHub Release
-# whenever a `v*` tag is pushed (or manually via the Actions tab). The
-# in-app updater checks the latest published release's `latest.json`, so
-# publishing the draft is what makes an update visible to users.
+# Builds the Windows and Linux installers and publishes them as a draft
+# GitHub Release whenever a `v*` tag is pushed (or manually via the Actions
+# tab). The in-app updater checks the latest published release's
+# `latest.json`, so publishing the draft is what makes an update visible to
+# users. Both platform jobs target the same tag/release: tauri-action
+# creates the draft on the first job to finish and appends assets from the
+# other, so which one runs first doesn't matter.
 on:
   push:
     tags:
@@ -12,7 +15,16 @@ on:
 
 jobs:
   release:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+          # ubuntu-22.04, not ubuntu-latest (24.04): the .deb/.rpm/AppImage
+          # link against the runner's glibc, and 24.04's is too new for
+          # older user systems to run the resulting binary.
+          - platform: ubuntu-22.04
+    runs-on: ${{ matrix.platform }}
     permissions:
       contents: write
     steps:
@@ -21,6 +33,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
