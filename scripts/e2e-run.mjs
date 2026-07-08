@@ -114,6 +114,35 @@ async function runScenarios(browser) {
     throw new Error("le DOM rendu ne contient pas l'élément racine React (#root)");
   }
 
+  // `<div id="root">` is static in index.html, so its mere presence proves
+  // nothing. Assert React actually rendered *into* it (waiting for the async
+  // mount): a strict CSP that blocks the app's scripts or stylesheet would leave
+  // #root empty, which this catches where the string check above can't.
+  await browser.waitUntil(
+    async () => (await browser.execute(() => document.getElementById("root")?.childElementCount ?? 0)) > 0,
+    {
+      timeout: 10_000,
+      timeoutMsg: "#root est resté vide : React n'a pas rendu — CSP trop stricte, script bloqué, ou erreur au montage",
+    },
+  );
+
+  // Exercise a real `invoke(...)` over Tauri's IPC — the thing a plain headless
+  // browser can't do. `master_password_status` is read-only (never creates or
+  // migrates anything), so it's safe against the real profile while still
+  // proving the command → core::vault path is wired end to end.
+  const vaultStatus = await browser.execute(async () => {
+    const internals = window.__TAURI_INTERNALS__;
+    if (!internals || typeof internals.invoke !== "function") return { __error: "window.__TAURI_INTERNALS__.invoke absent" };
+    try {
+      return await internals.invoke("master_password_status");
+    } catch (e) {
+      return { __error: String(e) };
+    }
+  });
+  if (!vaultStatus || typeof vaultStatus.enabled !== "boolean" || typeof vaultStatus.unlocked !== "boolean") {
+    throw new Error(`invoke("master_password_status") n'a pas répondu correctement via IPC : ${JSON.stringify(vaultStatus)}`);
+  }
+
   await mkdir(outDir, { recursive: true });
   const screenshotPath = path.join(outDir, "e2e-smoke.png");
   await browser.saveScreenshot(screenshotPath);

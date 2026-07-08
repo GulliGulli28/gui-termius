@@ -1,3 +1,4 @@
+use termius_core::sync_ext::MutexExt;
 use crate::state::AppState;
 use serde::Deserialize;
 use tauri::State;
@@ -10,7 +11,7 @@ use termius_core::vault::{self, SecretKind};
 
 #[tauri::command]
 pub fn get_workspace(state: State<'_, AppState>) -> Workspace {
-    state.workspace.lock().expect("lock poisoned").clone()
+    state.workspace.lock_recover().clone()
 }
 
 #[derive(Deserialize)]
@@ -42,7 +43,7 @@ fn persist(workspace: &Workspace) -> Result<(), String> {
 
 #[tauri::command]
 pub fn save_host(state: State<'_, AppState>, input: SaveHostInput) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
 
     let host_id = match input.id {
         Some(id) => {
@@ -125,14 +126,21 @@ pub fn add_private_key(
     path: String,
     passphrase: Option<String>,
 ) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Impossible de lire la clé «{}» : {}", path, e))?;
+    let id = KeyId::new_v4();
+    // When the master vault is unlocked, the key content is stored encrypted
+    // there instead of in cleartext in workspace.json.
+    let in_vault = vault::is_unlocked();
+    if in_vault {
+        vault::store_key_content(id, &content).map_err(|e| e.to_string())?;
+    }
     let key = PrivateKey {
-        id: KeyId::new_v4(),
+        id,
         name,
         path,
-        content: Some(content),
+        content: if in_vault { None } else { Some(content) },
     };
     if let Some(pp) = passphrase.filter(|s| !s.is_empty()) {
         let _ = vault::store(key.id, vault::SecretKind::KeyPassphrase, &pp);
@@ -144,9 +152,10 @@ pub fn add_private_key(
 
 #[tauri::command]
 pub fn delete_private_key(state: State<'_, AppState>, key_id: KeyId) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     workspace.keychain.retain(|k| k.id != key_id);
     let _ = vault::delete(key_id, vault::SecretKind::KeyPassphrase);
+    let _ = vault::delete_key_content(key_id);
     persist(&workspace)?;
     Ok(workspace.clone())
 }
@@ -157,7 +166,7 @@ pub fn rename_private_key(
     key_id: KeyId,
     name: String,
 ) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("Le nom ne peut pas être vide".to_string());
@@ -175,7 +184,7 @@ pub fn add_custom_icon(
     name: String,
     data_url: String,
 ) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     let id = uuid::Uuid::new_v4().to_string();
     workspace
         .custom_icons
@@ -189,7 +198,7 @@ pub fn delete_custom_icon(
     state: State<'_, AppState>,
     icon_id: String,
 ) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     for host in &mut workspace.hosts {
         if host.icon.as_deref() == Some(&icon_id) {
             host.icon = None;
@@ -235,13 +244,13 @@ pub async fn check_host_status(
     state: State<'_, AppState>,
     host_id: HostId,
 ) -> Result<bool, String> {
-    let workspace = state.workspace.lock().expect("lock poisoned").clone();
+    let workspace = state.workspace.lock_recover().clone();
     Ok(termius_core::ssh::probe(&workspace, host_id).await)
 }
 
 #[tauri::command]
 pub fn delete_host(state: State<'_, AppState>, host_id: HostId) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     workspace.hosts.retain(|h| h.id != host_id);
     for host in &mut workspace.hosts {
         host.jump_via.retain(|&jid| jid != host_id);
@@ -287,7 +296,7 @@ fn would_create_group_cycle(
 
 #[tauri::command]
 pub fn save_group(state: State<'_, AppState>, input: SaveGroupInput) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     match input.id {
         Some(id) => {
             if would_create_group_cycle(&workspace, id, input.parent_id) {
@@ -314,7 +323,7 @@ pub fn save_group(state: State<'_, AppState>, input: SaveGroupInput) -> Result<W
 
 #[tauri::command]
 pub fn delete_group(state: State<'_, AppState>, group_id: GroupId) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     let parent_id = workspace
         .groups
         .iter()
@@ -343,7 +352,7 @@ pub fn add_snippet(
     name: String,
     command: String,
 ) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     workspace.snippets.push(Snippet {
         id: SnippetId::new_v4(),
         name,
@@ -361,7 +370,7 @@ pub fn update_snippet(
     name: String,
     command: String,
 ) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     if let Some(snippet) = workspace.snippets.iter_mut().find(|s| s.id == snippet_id) {
         snippet.name = name;
         snippet.command = command;
@@ -375,7 +384,7 @@ pub fn delete_snippet(
     state: State<'_, AppState>,
     snippet_id: SnippetId,
 ) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     workspace.snippets.retain(|s| s.id != snippet_id);
     persist(&workspace)?;
     Ok(workspace.clone())
@@ -397,7 +406,7 @@ pub fn add_forward(
     state: State<'_, AppState>,
     input: AddForwardInput,
 ) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     workspace.port_forwards.push(PortForward {
         id: PortForwardId::new_v4(),
         host_id: input.host_id,
@@ -418,13 +427,12 @@ pub async fn delete_forward(
 ) -> Result<Workspace, String> {
     let session = state
         .forwards
-        .lock()
-        .expect("lock poisoned")
+        .lock_recover()
         .remove(&forward_id);
     if let Some(session) = session {
         session.active.stop(&session.connection).await;
     }
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     workspace.port_forwards.retain(|f| f.id != forward_id);
     persist(&workspace)?;
     Ok(workspace.clone())

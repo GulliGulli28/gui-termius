@@ -6,3 +6,4 @@ pub mod hosts;
 pub mod known_hosts;
 pub mod sftp;
 pub mod terminal;
+pub mod vault;

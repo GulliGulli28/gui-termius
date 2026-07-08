@@ -1,4 +1,4 @@
-import type { Group, GroupId, Host, HostId, KeyId, PortForwardId, SnippetId, Workspace } from "../lib/types";
+import type { Group, GroupId, Host, HostId, KeyId, PortForwardId, SnippetId, VaultStatus, Workspace } from "../lib/types";
 import type { AppPreferences } from "../lib/preferences";
 import type { ComponentType } from "react";
 import { HostsPanel } from "./HostsPanel";
@@ -41,6 +41,8 @@ interface SidebarProps {
   onError: (message: string) => void;
   preferences: AppPreferences;
   onPreferencesChange: (p: AppPreferences) => void;
+  vaultStatus: VaultStatus | null;
+  onVaultStatusChange: () => void;
 }
 
 const TABS: { key: Exclude<SidebarPanelKind, "settings">; label: string; Icon: ComponentType<{ size?: number }> }[] = [
@@ -150,6 +152,8 @@ export function Sidebar(props: SidebarProps) {
               onError={props.onError}
               preferences={props.preferences}
               onPreferencesChange={props.onPreferencesChange}
+              vaultStatus={props.vaultStatus}
+              onVaultStatusChange={props.onVaultStatusChange}
             />
           )}
         </div>

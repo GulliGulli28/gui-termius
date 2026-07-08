@@ -39,7 +39,7 @@ fn save_to(path: &PathBuf, history: &[String]) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let raw = serde_json::to_string_pretty(history)?;
-    std::fs::write(path, raw)?;
+    crate::secure_file::write_private(path, raw.as_bytes())?;
     Ok(())
 }
 

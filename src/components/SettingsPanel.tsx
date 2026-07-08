@@ -5,11 +5,12 @@ import { getVersion } from "@tauri-apps/api/app";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { api } from "../lib/api";
-import type { Workspace } from "../lib/types";
+import type { VaultStatus, Workspace } from "../lib/types";
 import type { AppPreferences } from "../lib/preferences";
 import { TERMINAL_THEMES, FONT_FAMILIES, ACCENT_COLORS, BG_THEMES, type UiAccent, type UiBg, type ColorMode } from "../lib/preferences";
 import { SHORTCUT_ACTIONS, defaultShortcuts, comboFromEvent, shellBindingWarning } from "../lib/shortcuts";
-import { IconUpload, IconDownload, IconPalette, IconTerminal, IconTransfer, IconKeyboard, IconBell, IconSettings, IconSun, IconMoon, IconRefresh } from "./ui-icons";
+import { IconUpload, IconDownload, IconPalette, IconTerminal, IconTransfer, IconKeyboard, IconBell, IconSettings, IconSun, IconMoon, IconRefresh, IconShield } from "./ui-icons";
+import { VaultSettings } from "./VaultSettings";
 
 type UpdateStatus = "idle" | "checking" | "upToDate" | "available" | "installing" | "error";
 
@@ -19,16 +20,19 @@ interface SettingsPanelProps {
   onError: (msg: string) => void;
   preferences: AppPreferences;
   onPreferencesChange: (p: AppPreferences) => void;
+  vaultStatus: VaultStatus | null;
+  onVaultStatusChange: () => void;
 }
 
 type ImportPending = { path: string };
 
-type SettingsCategory = "apparence" | "terminal" | "sftp" | "raccourcis" | "notifications" | "general";
+type SettingsCategory = "apparence" | "terminal" | "sftp" | "securite" | "raccourcis" | "notifications" | "general";
 
 const CATEGORIES: { key: SettingsCategory; label: string; Icon: ComponentType<{ size?: number }> }[] = [
   { key: "apparence", label: "Apparence", Icon: IconPalette },
   { key: "terminal", label: "Terminal", Icon: IconTerminal },
   { key: "sftp", label: "SFTP", Icon: IconTransfer },
+  { key: "securite", label: "Sécurité", Icon: IconShield },
   { key: "raccourcis", label: "Raccourcis", Icon: IconKeyboard },
   { key: "notifications", label: "Notifications", Icon: IconBell },
   { key: "general", label: "Général", Icon: IconSettings },
@@ -86,7 +90,7 @@ function ToggleRow({ label, checked, onChange }: { label: string; checked: boole
   );
 }
 
-export function SettingsPanel({ workspace, onWorkspaceUpdate, onError, preferences, onPreferencesChange }: SettingsPanelProps) {
+export function SettingsPanel({ workspace, onWorkspaceUpdate, onError, preferences, onPreferencesChange, vaultStatus, onVaultStatusChange }: SettingsPanelProps) {
   const [category, setCategory] = useState<SettingsCategory>("apparence");
   const [importPending, setImportPending] = useState<ImportPending | null>(null);
   const [done, setDone] = useState<string | null>(null);
@@ -450,6 +454,15 @@ export function SettingsPanel({ workspace, onWorkspaceUpdate, onError, preferenc
               </div>
             </div>
           </section>
+        )}
+
+        {category === "securite" && (
+          <VaultSettings
+            status={vaultStatus}
+            onChange={onVaultStatusChange}
+            preferences={preferences}
+            onPreferencesChange={onPreferencesChange}
+          />
         )}
 
         {category === "raccourcis" && (

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AuthMethod, EnvVar, Entry, GroupId, HostId, ImportSelection, KeyId, KnownHostEntry, PaneListed, PaneOpened, PaneSource, PortForwardId, PortForwardKind, SnippetId, SshConfigHost, TransferProgressEvent, Workspace } from "./types";
+import type { AuthMethod, EnvVar, Entry, GroupId, HostId, ImportSelection, KeyId, KnownHostEntry, PaneListed, PaneOpened, PaneSource, PortForwardId, PortForwardKind, SnippetId, SshConfigHost, TransferProgressEvent, VaultStatus, Workspace } from "./types";
 
 export const api = {
   getWorkspace: () => invoke<Workspace>("get_workspace"),
@@ -52,6 +52,14 @@ export const api = {
   startForward: (forwardId: PortForwardId) => invoke<void>("start_forward", { forwardId }),
   stopForward: (forwardId: PortForwardId) => invoke<void>("stop_forward", { forwardId }),
   runningForwards: () => invoke<PortForwardId[]>("running_forwards"),
+
+  // Master-password vault (opt-in encrypted secret store).
+  masterPasswordStatus: () => invoke<VaultStatus>("master_password_status"),
+  setMasterPassword: (password: string) => invoke<void>("set_master_password", { password }),
+  unlockVault: (password: string) => invoke<void>("unlock_vault", { password }),
+  lockVault: () => invoke<void>("lock_vault"),
+  changeMasterPassword: (current: string, next: string) => invoke<void>("change_master_password", { current, new: next }),
+  disableMasterPassword: (current: string) => invoke<void>("disable_master_password", { current }),
 
   listKnownHosts: () => invoke<KnownHostEntry[]>("list_known_hosts"),
   revokeKnownHost: (identity: string) => invoke<void>("revoke_known_host", { identity }),

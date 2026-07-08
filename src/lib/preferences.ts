@@ -93,6 +93,8 @@ export interface AppPreferences {
   localTerminalSuggestions: boolean;
   /** Same ghost-text suggestions, but for SSH terminals (history shared across all hosts). Off by default: network latency and remote-shell quirks make it less predictable than the local version. */
   sshTerminalSuggestions: boolean;
+  /** Minutes of inactivity after which the master-password vault auto-locks. `0` = never. Only relevant when a master password is set. */
+  masterVaultAutoLockMinutes: number;
 }
 
 export interface TerminalThemeEntry {
@@ -253,6 +255,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   defaultLocalShell: null,
   localTerminalSuggestions: true,
   sshTerminalSuggestions: false,
+  masterVaultAutoLockMinutes: 0,
 };
 
 // Same two-stop aurora wash as `.app-aurora-bg` in index.css, but layered over

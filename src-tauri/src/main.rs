@@ -10,7 +10,23 @@ use tauri::Manager;
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let workspace = termius_core::store::load().unwrap_or_default();
+    let workspace = match termius_core::store::load_resilient() {
+        Ok(termius_core::store::LoadOutcome::Loaded(ws)) => ws,
+        Ok(termius_core::store::LoadOutcome::Recovered { workspace, backup }) => {
+            // Don't silently swallow this: the previous behaviour started with an
+            // empty workspace and the first save then destroyed the real file.
+            tracing::error!(
+                "workspace.json illisible ou corrompu — fichier préservé sous « {} » ; \
+                 démarrage avec un espace de travail vide",
+                backup.display()
+            );
+            workspace
+        }
+        Err(e) => {
+            tracing::error!("échec du chargement du workspace : {e} — démarrage à vide");
+            termius_core::model::Workspace::default()
+        }
+    };
     let local_history = termius_core::command_history::load("local_history.json").unwrap_or_default();
     let ssh_history = termius_core::command_history::load("ssh_history.json").unwrap_or_default();
     let app_state = AppState {
@@ -88,6 +104,12 @@ fn main() {
             commands::known_hosts::revoke_known_host,
             commands::known_hosts::preview_ssh_config_import,
             commands::known_hosts::import_ssh_config_hosts,
+            commands::vault::master_password_status,
+            commands::vault::set_master_password,
+            commands::vault::unlock_vault,
+            commands::vault::lock_vault,
+            commands::vault::change_master_password,
+            commands::vault::disable_master_password,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

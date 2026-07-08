@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
 import { save } from "@tauri-apps/plugin-dialog";
 import { api, bytesToBase64 } from "./lib/api";
-import type { GroupId, Host, HostId, TabMeta, Workspace } from "./lib/types";
+import type { GroupId, Host, HostId, TabMeta, VaultStatus, Workspace } from "./lib/types";
 import { Sidebar, type SidebarPanelKind } from "./components/Sidebar";
 import { HostForm } from "./components/HostForm";
 import { TabBar } from "./components/TabBar";
@@ -19,6 +19,7 @@ import { type AppNotification, type NotificationKind, createNotification } from 
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { SnippetPicker } from "./components/SnippetPicker";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { VaultUnlockModal } from "./components/VaultUnlockModal";
 import { SHORTCUT_ACTIONS, useGlobalShortcuts } from "./lib/shortcuts";
 import { loadTabs, saveTabs } from "./lib/tabPersistence";
 
@@ -53,6 +54,12 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [snippetPickerOpen, setSnippetPickerOpen] = useState(false);
   const terminalRefs = useRef<Map<string, TerminalTabHandle>>(new Map());
+
+  // ── Master-password vault ─────────────────────────────────────────────────
+  const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
+  const [unlockModalOpen, setUnlockModalOpen] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+  const [unlockSubmitting, setUnlockSubmitting] = useState(false);
 
   // ── Resizable panels ─────────────────────────────────────────────────────
   const [sidebarWidth, setSidebarWidth] = useState(320);
@@ -177,6 +184,53 @@ export default function App() {
   useEffect(() => {
     api.getWorkspace().then(setWorkspace).catch((e) => reportError(String(e)));
   }, [reportError]);
+
+  // Fetch the master-vault status; if a vault exists but is locked, prompt for
+  // the master password. Called again after any vault action (enable/lock/…).
+  const refreshVaultStatus = useCallback(async () => {
+    try {
+      const s = await api.masterPasswordStatus();
+      setVaultStatus(s);
+      if (s.enabled && !s.unlocked) setUnlockModalOpen(true);
+    } catch { /* backend unavailable — ignore */ }
+  }, []);
+
+  useEffect(() => { refreshVaultStatus(); }, [refreshVaultStatus]);
+
+  const submitUnlock = useCallback(async (password: string) => {
+    setUnlockSubmitting(true);
+    setUnlockError(null);
+    try {
+      await api.unlockVault(password);
+      setUnlockModalOpen(false);
+      setVaultStatus(await api.masterPasswordStatus());
+    } catch (e) {
+      setUnlockError(String(e));
+    } finally {
+      setUnlockSubmitting(false);
+    }
+  }, []);
+
+  // Auto-lock after a configurable idle period. Any mouse/keyboard activity
+  // resets the countdown; when it fires we lock and re-prompt for the password.
+  useEffect(() => {
+    const minutes = preferences.masterVaultAutoLockMinutes ?? 0;
+    if (!vaultStatus?.enabled || !vaultStatus?.unlocked || minutes <= 0) return;
+    let timer: number | undefined;
+    const reset = () => {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        api.lockVault().catch(() => {}).finally(() => refreshVaultStatus());
+      }, minutes * 60_000);
+    };
+    const events: (keyof WindowEventMap)[] = ["mousemove", "mousedown", "keydown"];
+    events.forEach((e) => window.addEventListener(e, reset));
+    reset();
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      events.forEach((e) => window.removeEventListener(e, reset));
+    };
+  }, [vaultStatus?.enabled, vaultStatus?.unlocked, preferences.masterVaultAutoLockMinutes, refreshVaultStatus]);
 
   // Silent background check on launch, repeated every few hours for
   // long-running sessions. Only surfaces a notification pointing to
@@ -424,9 +478,19 @@ export default function App() {
     },
   ] : [];
 
+  const vaultUnlockModal = unlockModalOpen && vaultStatus?.enabled ? (
+    <VaultUnlockModal
+      error={unlockError}
+      submitting={unlockSubmitting}
+      onDismiss={() => { setUnlockModalOpen(false); setUnlockError(null); }}
+      onSubmit={submitUnlock}
+    />
+  ) : null;
+
   if (!workspace) {
     return (
       <div className="app-aurora-bg flex h-screen w-screen flex-col overflow-hidden text-[var(--c-text)]">
+        {vaultUnlockModal}
         <TitleBar
           sidebarVisible={sidebarVisible}
           onToggleSidebar={() => setSidebarVisible((v) => !v)}
@@ -458,6 +522,7 @@ export default function App() {
     <div className="app-aurora-bg flex h-screen w-screen flex-col overflow-hidden text-[var(--c-text)]">
       {/* Transparent overlay during any drag — prevents xterm canvas from stealing mouse events */}
       {isDragging && <div className="fixed inset-0 z-[9999] cursor-col-resize" />}
+      {vaultUnlockModal}
       {paletteOpen && <CommandPalette commands={paletteCommands} onClose={() => setPaletteOpen(false)} />}
       {snippetPickerOpen && workspace && (
         <SnippetPicker
@@ -557,6 +622,8 @@ export default function App() {
             onError={reportError}
             preferences={preferences}
             onPreferencesChange={updatePreferences}
+            vaultStatus={vaultStatus}
+            onVaultStatusChange={refreshVaultStatus}
           />
         </div>
 

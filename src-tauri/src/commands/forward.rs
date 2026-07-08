@@ -1,3 +1,4 @@
+use termius_core::sync_ext::MutexExt;
 use crate::state::{AppState, ForwardSession};
 use std::sync::Arc;
 use tauri::State;
@@ -11,14 +12,13 @@ pub async fn start_forward(
 ) -> Result<(), String> {
     if state
         .forwards
-        .lock()
-        .expect("lock poisoned")
+        .lock_recover()
         .contains_key(&forward_id)
     {
         return Ok(());
     }
     let (workspace, forward) = {
-        let workspace = state.workspace.lock().expect("lock poisoned");
+        let workspace = state.workspace.lock_recover();
         let forward = workspace
             .port_forwards
             .iter()
@@ -38,8 +38,7 @@ pub async fn start_forward(
         .map_err(|e| e.to_string())?;
     state
         .forwards
-        .lock()
-        .expect("lock poisoned")
+        .lock_recover()
         .insert(forward_id, ForwardSession { connection, active });
     Ok(())
 }
@@ -51,8 +50,7 @@ pub async fn stop_forward(
 ) -> Result<(), String> {
     let session = state
         .forwards
-        .lock()
-        .expect("lock poisoned")
+        .lock_recover()
         .remove(&forward_id);
     if let Some(session) = session {
         session.active.stop(&session.connection).await;
@@ -64,8 +62,7 @@ pub async fn stop_forward(
 pub fn running_forwards(state: State<'_, AppState>) -> Vec<PortForwardId> {
     state
         .forwards
-        .lock()
-        .expect("lock poisoned")
+        .lock_recover()
         .keys()
         .copied()
         .collect()

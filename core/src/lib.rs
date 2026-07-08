@@ -1,12 +1,16 @@
-pub mod export;
 pub mod command_history;
+pub mod crypto;
+pub mod export;
 pub mod known_hosts;
+pub mod master_vault;
 pub mod local_fs;
 pub mod model;
 pub mod port_forward;
+pub mod secure_file;
 pub mod sftp;
 pub mod ssh;
 pub mod ssh_config;
 pub mod store;
+pub mod sync_ext;
 pub mod transfer;
 pub mod vault;

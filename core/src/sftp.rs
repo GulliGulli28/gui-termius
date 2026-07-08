@@ -23,6 +23,11 @@ pub struct Entry {
 /// progress, large enough to not dominate transfer time with round-trips.
 const CHUNK_SIZE: usize = 256 * 1024;
 
+/// Upper bound on a file opened for the in-app quick-edit modal. Quick-edit is
+/// meant for small text files; capping the read stops a huge (or a maliciously
+/// unbounded) remote file from exhausting memory.
+pub const MAX_EDIT_BYTES: u64 = 5 * 1024 * 1024;
+
 pub struct SftpClient {
     session: SftpSession,
 }
@@ -89,9 +94,17 @@ impl SftpClient {
     /// gate on size before calling this.
     pub async fn read_to_string(&self, path: &str) -> anyhow::Result<String> {
         use tokio::io::AsyncReadExt;
-        let mut file = self.session.open(path).await?;
+        let file = self.session.open(path).await?;
         let mut buf = Vec::new();
-        file.read_to_end(&mut buf).await?;
+        // Read at most one byte past the cap: enough to tell the file is over the
+        // limit without ever buffering the whole thing.
+        file.take(MAX_EDIT_BYTES + 1).read_to_end(&mut buf).await?;
+        if buf.len() as u64 > MAX_EDIT_BYTES {
+            anyhow::bail!(
+                "fichier trop volumineux pour l'édition rapide (> {} Mo)",
+                MAX_EDIT_BYTES / (1024 * 1024)
+            );
+        }
         String::from_utf8(buf)
             .map_err(|_| anyhow::anyhow!("le fichier n'est pas du texte UTF-8 valide"))
     }
@@ -191,6 +204,28 @@ impl SftpClient {
     }
 }
 
+/// Validates that `name` is a single, safe path component before it is used to
+/// build a filesystem path.
+///
+/// A remote SFTP server fully controls the filenames it returns in a directory
+/// listing. Without this check, a malicious or compromised server could return a
+/// name like `../../.ssh/authorized_keys` (or one containing an absolute path)
+/// and make a *download* write outside the directory the user picked — classic
+/// path traversal. A legitimate filename is never empty, `.`, `..`, nor contains
+/// a path separator or a NUL byte.
+pub fn ensure_safe_component(name: &str) -> anyhow::Result<()> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        anyhow::bail!("nom d'entrée invalide ou potentiellement malveillant : {name:?}");
+    }
+    Ok(())
+}
+
 /// Joins a remote POSIX path with a child segment (`..` navigates up).
 pub fn join(base: &str, segment: &str) -> String {
     if segment == ".." {
@@ -205,5 +240,32 @@ pub fn join(base: &str, segment: &str) -> String {
         format!("{base}{segment}")
     } else {
         format!("{base}/{segment}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_traversal_and_separators() {
+        for bad in [
+            "", ".", "..", "../etc", "a/b", "a\\b", "/abs", "sub/../x", "x\0y",
+        ] {
+            assert!(
+                ensure_safe_component(bad).is_err(),
+                "server-supplied name {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_plain_filenames() {
+        for ok in ["file.txt", "my dir", ".bashrc", "a.b.c", "café.md", "..."] {
+            assert!(
+                ensure_safe_component(ok).is_ok(),
+                "ordinary filename {ok:?} must be accepted"
+            );
+        }
     }
 }

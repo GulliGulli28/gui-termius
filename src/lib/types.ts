@@ -84,6 +84,13 @@ export interface KnownHostEntry {
   publicKey: string;
 }
 
+/** State of the optional master-password vault. `enabled` = a master password
+ * is configured; `unlocked` = the secrets are decryptable this session. */
+export interface VaultStatus {
+  enabled: boolean;
+  unlocked: boolean;
+}
+
 export interface SshConfigHost {
   alias: string;
   hostname: string | null;

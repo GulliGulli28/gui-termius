@@ -1,3 +1,4 @@
+use termius_core::sync_ext::MutexExt;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -91,7 +92,7 @@ pub fn import_ssh_config_hosts(
     state: State<'_, AppState>,
     selections: Vec<ImportSelection>,
 ) -> Result<Workspace, String> {
-    let mut workspace = state.workspace.lock().expect("lock poisoned");
+    let mut workspace = state.workspace.lock_recover();
     for sel in selections {
         let mut host = Host::new(sel.alias, sel.hostname, sel.user);
         host.port = sel.port;

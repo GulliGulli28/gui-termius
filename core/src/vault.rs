@@ -1,10 +1,23 @@
-//! Secret storage backed by the OS keychain (Keychain/Credential Manager/Secret Service).
-//! When the OS keychain is unavailable (e.g. headless Linux or WSL without Secret Service),
-//! secrets fall back to a process-lifetime in-memory store so password auth still works
-//! for the duration of the session. On restart the user must re-enter the password once.
-use crate::model::HostId;
+//! Secret storage for passwords and key passphrases. Two backends:
+//!
+//! - **Default (keychain):** the OS keychain (Keychain / Credential Manager /
+//!   Secret Service), with a process-lifetime in-memory fallback when it is
+//!   unavailable (headless Linux / WSL without Secret Service). On restart the
+//!   user re-enters the password once.
+//! - **Opt-in master-password vault:** once the user sets a master password, an
+//!   encrypted file ([`crate::master_vault`]) supersedes the keychain. It is
+//!   portable (safe to sync between machines) and works where no OS keychain
+//!   exists — but is only readable while unlocked.
+//!
+//! `store`/`load`/`delete` keep the same signature in both modes, so callers
+//! (`ssh::authenticate`, `commands::hosts`) don't care which backend is active.
+use crate::master_vault::MasterVault;
+use crate::model::{HostId, KeyId};
+use crate::sync_ext::MutexExt;
 use keyring::Entry;
+use serde::Serialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 const SERVICE: &str = "gui-termius";
@@ -24,12 +37,212 @@ impl SecretKind {
     }
 }
 
-fn entry(host_id: HostId, kind: SecretKind) -> Result<Entry, keyring::Error> {
-    Entry::new(SERVICE, &format!("{host_id}:{}", kind.suffix()))
+/// Whether the master-password vault is configured, and if so whether it is
+/// currently unlocked. Reported to the frontend so it can prompt for unlock.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultStatus {
+    pub enabled: bool,
+    pub unlocked: bool,
 }
 
-fn fallback_key(host_id: HostId, kind: SecretKind) -> String {
+// ─── Backend state ──────────────────────────────────────────────────────────
+
+enum Backend {
+    /// No master password set: secrets live in the OS keychain (+ fallback map).
+    Keychain,
+    /// A master-vault file exists but hasn't been unlocked this session.
+    Locked,
+    /// Unlocked master vault held in memory (the data key is zeroized on drop).
+    Unlocked(Box<MasterVault>),
+}
+
+fn state() -> &'static Mutex<Backend> {
+    static STATE: OnceLock<Mutex<Backend>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(initial_backend()))
+}
+
+fn initial_backend() -> Backend {
+    match vault_file() {
+        Ok(p) if MasterVault::exists(&p) => Backend::Locked,
+        _ => Backend::Keychain,
+    }
+}
+
+fn vault_file() -> anyhow::Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("dev", "gui-termius", "gui-termius")
+        .ok_or_else(|| anyhow::anyhow!("could not determine config directory"))?;
+    Ok(dirs.config_dir().join("secrets.enc"))
+}
+
+fn secret_key(host_id: HostId, kind: SecretKind) -> String {
     format!("{host_id}:{}", kind.suffix())
+}
+
+// ─── Public secret API (backend-agnostic) ───────────────────────────────────
+
+pub fn store(host_id: HostId, kind: SecretKind, secret: &str) -> anyhow::Result<()> {
+    let mut st = state().lock_recover();
+    match &mut *st {
+        Backend::Unlocked(vault) => vault.set(&secret_key(host_id, kind), secret),
+        Backend::Locked => {
+            anyhow::bail!("coffre verrouillé — déverrouillez-le avant d'enregistrer un secret")
+        }
+        Backend::Keychain => keychain_store(host_id, kind, secret),
+    }
+}
+
+pub fn load(host_id: HostId, kind: SecretKind) -> anyhow::Result<Option<String>> {
+    let st = state().lock_recover();
+    match &*st {
+        Backend::Unlocked(vault) => vault.get(&secret_key(host_id, kind)),
+        Backend::Locked => {
+            anyhow::bail!("coffre verrouillé — déverrouillez-le pour utiliser ce secret")
+        }
+        Backend::Keychain => keychain_load(host_id, kind),
+    }
+}
+
+pub fn delete(host_id: HostId, kind: SecretKind) -> anyhow::Result<()> {
+    let mut st = state().lock_recover();
+    match &mut *st {
+        Backend::Unlocked(vault) => vault.remove(&secret_key(host_id, kind)),
+        // Removing a slot while locked would need the file rewritten; the stale
+        // encrypted entry is harmless, so defer rather than fail unrelated edits
+        // (e.g. `save_host` cleaning up an old auth slot).
+        Backend::Locked => Ok(()),
+        Backend::Keychain => keychain_delete(host_id, kind),
+    }
+}
+
+// ─── Private-key PEM content ─────────────────────────────────────────────────
+//
+// Unlike passwords/passphrases, private-key content lives in `workspace.json`
+// (0600) by default rather than the OS keychain — the keychain has size limits
+// (Windows CredWrite caps the blob) and its WSL fallback wouldn't survive a
+// restart. When the master vault is unlocked it holds the key content instead
+// (encrypted, no size limit, persistent), so these functions only ever touch
+// the vault; the caller keeps managing the `workspace.json` copy for keychain
+// mode.
+
+fn key_content_id(key_id: KeyId) -> String {
+    format!("{key_id}:content")
+}
+
+/// The encrypted key content from the vault, or `None` when the vault isn't the
+/// active store (keychain mode / locked) — the caller then falls back to the
+/// `workspace.json` copy.
+pub fn load_key_content(key_id: KeyId) -> anyhow::Result<Option<String>> {
+    match &*state().lock_recover() {
+        Backend::Unlocked(vault) => vault.get(&key_content_id(key_id)),
+        _ => Ok(None),
+    }
+}
+
+/// Stores key content in the vault. Requires the vault to be unlocked (callers
+/// gate on [`is_unlocked`]); in keychain mode the content stays in `workspace.json`.
+pub fn store_key_content(key_id: KeyId, content: &str) -> anyhow::Result<()> {
+    match &mut *state().lock_recover() {
+        Backend::Unlocked(vault) => vault.set(&key_content_id(key_id), content),
+        _ => anyhow::bail!("coffre non déverrouillé"),
+    }
+}
+
+pub fn delete_key_content(key_id: KeyId) -> anyhow::Result<()> {
+    match &mut *state().lock_recover() {
+        Backend::Unlocked(vault) => vault.remove(&key_content_id(key_id)),
+        _ => Ok(()),
+    }
+}
+
+/// Whether the master vault is currently unlocked (so key content should be
+/// routed through it rather than `workspace.json`).
+pub fn is_unlocked() -> bool {
+    matches!(&*state().lock_recover(), Backend::Unlocked(_))
+}
+
+// ─── Master-vault management ─────────────────────────────────────────────────
+
+pub fn status() -> VaultStatus {
+    match &*state().lock_recover() {
+        Backend::Keychain => VaultStatus { enabled: false, unlocked: false },
+        Backend::Locked => VaultStatus { enabled: true, unlocked: false },
+        Backend::Unlocked(_) => VaultStatus { enabled: true, unlocked: true },
+    }
+}
+
+/// Turns on the master-password vault: creates the encrypted file, moves the
+/// given secrets into it, and clears them from the OS keychain. `migrate` is
+/// collected by the caller (which knows the workspace) *before* calling this,
+/// while the keychain backend is still active.
+pub fn enable(password: &str, migrate: &[(HostId, SecretKind, String)]) -> anyhow::Result<()> {
+    let mut st = state().lock_recover();
+    if !matches!(&*st, Backend::Keychain) {
+        anyhow::bail!("un mot de passe maître est déjà configuré");
+    }
+    let mut vault = MasterVault::create(&vault_file()?, password)?;
+    for (id, kind, secret) in migrate {
+        vault.set(&secret_key(*id, *kind), secret)?;
+    }
+    *st = Backend::Unlocked(Box::new(vault));
+    drop(st);
+    // The secrets now live (encrypted) in the vault; remove the keychain copies.
+    for (id, kind, _) in migrate {
+        let _ = keychain_delete(*id, *kind);
+    }
+    Ok(())
+}
+
+/// Unlocks the vault for this session. No-op if already unlocked; errors on a
+/// wrong password.
+pub fn unlock(password: &str) -> anyhow::Result<()> {
+    let mut st = state().lock_recover();
+    if matches!(&*st, Backend::Unlocked(_)) {
+        return Ok(());
+    }
+    let vault = MasterVault::unlock(&vault_file()?, password)?;
+    *st = Backend::Unlocked(Box::new(vault));
+    Ok(())
+}
+
+/// Drops the in-memory data key (manual lock or auto-lock). Secrets become
+/// unreadable until unlocked again.
+pub fn lock() {
+    let mut st = state().lock_recover();
+    if matches!(&*st, Backend::Unlocked(_)) {
+        *st = Backend::Locked;
+    }
+}
+
+/// Changes the master password (verifying `current` first). Cheap — only the
+/// wrapped data key is re-derived, not every secret.
+pub fn change_password(current: &str, new: &str) -> anyhow::Result<()> {
+    // Verify `current` by re-unlocking from disk regardless of session state.
+    let mut vault = MasterVault::unlock(&vault_file()?, current)?;
+    vault.change_password(new)?;
+    *state().lock_recover() = Backend::Unlocked(Box::new(vault));
+    Ok(())
+}
+
+/// Turns the master vault back off: verifies `current`, restores the given
+/// secrets to the OS keychain, and deletes the encrypted file. `migrate` is
+/// collected by the caller from the (still unlocked) vault before calling this.
+pub fn disable(current: &str, migrate: &[(HostId, SecretKind, String)]) -> anyhow::Result<()> {
+    MasterVault::unlock(&vault_file()?, current)?; // verify current password
+    let mut st = state().lock_recover();
+    *st = Backend::Keychain;
+    let _ = std::fs::remove_file(vault_file()?);
+    drop(st);
+    for (id, kind, secret) in migrate {
+        keychain_store(*id, *kind, secret)?;
+    }
+    Ok(())
+}
+
+// ─── OS keychain backend ─────────────────────────────────────────────────────
+
+fn entry(host_id: HostId, kind: SecretKind) -> Result<Entry, keyring::Error> {
+    Entry::new(SERVICE, &secret_key(host_id, kind))
 }
 
 fn fallback() -> &'static Mutex<HashMap<String, String>> {
@@ -37,44 +250,38 @@ fn fallback() -> &'static Mutex<HashMap<String, String>> {
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn store(host_id: HostId, kind: SecretKind, secret: &str) -> anyhow::Result<()> {
+fn keychain_store(host_id: HostId, kind: SecretKind, secret: &str) -> anyhow::Result<()> {
     let keychain_ok = entry(host_id, kind)
         .and_then(|e| e.set_password(secret))
         .is_ok();
     if !keychain_ok {
         tracing::debug!("OS keychain unavailable, storing secret for {host_id} in process memory");
         fallback()
-            .lock()
-            .unwrap()
-            .insert(fallback_key(host_id, kind), secret.to_owned());
+            .lock_recover()
+            .insert(secret_key(host_id, kind), secret.to_owned());
     }
     Ok(())
 }
 
-pub fn load(host_id: HostId, kind: SecretKind) -> anyhow::Result<Option<String>> {
+fn keychain_load(host_id: HostId, kind: SecretKind) -> anyhow::Result<Option<String>> {
     match entry(host_id, kind).and_then(|e| e.get_password()) {
         Ok(secret) => Ok(Some(secret)),
         Err(keyring::Error::NoEntry) => Ok(fallback()
-            .lock()
-            .unwrap()
-            .get(&fallback_key(host_id, kind))
+            .lock_recover()
+            .get(&secret_key(host_id, kind))
             .cloned()),
         Err(err) => {
             tracing::debug!("OS keychain unavailable for load ({err}), checking process memory");
             Ok(fallback()
-                .lock()
-                .unwrap()
-                .get(&fallback_key(host_id, kind))
+                .lock_recover()
+                .get(&secret_key(host_id, kind))
                 .cloned())
         }
     }
 }
 
-pub fn delete(host_id: HostId, kind: SecretKind) -> anyhow::Result<()> {
-    fallback()
-        .lock()
-        .unwrap()
-        .remove(&fallback_key(host_id, kind));
+fn keychain_delete(host_id: HostId, kind: SecretKind) -> anyhow::Result<()> {
+    fallback().lock_recover().remove(&secret_key(host_id, kind));
     match entry(host_id, kind) {
         Ok(e) => match e.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -89,10 +296,11 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    // Each test uses its own random host_id so runs never collide with each
-    // other or with real entries, and always deletes what it stored: on
-    // machines with a working OS keychain these round-trip through the real
-    // Credential Manager / Keychain / Secret Service, not just the fallback map.
+    // These exercise the keychain backend (the default). On machines with a
+    // working OS keychain they round-trip through the real Credential Manager /
+    // Keychain / Secret Service; otherwise through the in-memory fallback. Each
+    // test uses a random host_id so runs never collide, and cleans up after
+    // itself. The master-vault backend is covered in `crate::master_vault`.
 
     #[test]
     fn load_missing_secret_returns_none() {
@@ -104,9 +312,7 @@ mod tests {
     fn store_then_load_roundtrips() {
         let host_id = Uuid::new_v4();
         store(host_id, SecretKind::Password, "hunter2").unwrap();
-
         assert_eq!(load(host_id, SecretKind::Password).unwrap().as_deref(), Some("hunter2"));
-
         delete(host_id, SecretKind::Password).unwrap();
         assert!(load(host_id, SecretKind::Password).unwrap().is_none());
     }
@@ -116,10 +322,8 @@ mod tests {
         let host_id = Uuid::new_v4();
         store(host_id, SecretKind::Password, "pw-secret").unwrap();
         store(host_id, SecretKind::KeyPassphrase, "passphrase-secret").unwrap();
-
         assert_eq!(load(host_id, SecretKind::Password).unwrap().as_deref(), Some("pw-secret"));
         assert_eq!(load(host_id, SecretKind::KeyPassphrase).unwrap().as_deref(), Some("passphrase-secret"));
-
         delete(host_id, SecretKind::Password).unwrap();
         delete(host_id, SecretKind::KeyPassphrase).unwrap();
     }
@@ -136,9 +340,20 @@ mod tests {
         let host_id = Uuid::new_v4();
         store(host_id, SecretKind::Password, "first").unwrap();
         store(host_id, SecretKind::Password, "second").unwrap();
-
         assert_eq!(load(host_id, SecretKind::Password).unwrap().as_deref(), Some("second"));
-
         delete(host_id, SecretKind::Password).unwrap();
+    }
+
+    #[test]
+    fn key_content_falls_back_when_no_vault_is_unlocked() {
+        // Without an unlocked master vault (the default: keychain mode), key
+        // content is never in the vault — `load_key_content` returns None so the
+        // caller (ssh::authenticate) falls back to the workspace/file copy, and
+        // storing into the vault is refused. `delete` is a harmless no-op.
+        let key_id = Uuid::new_v4();
+        assert!(!is_unlocked());
+        assert!(load_key_content(key_id).unwrap().is_none());
+        assert!(store_key_content(key_id, "-----BEGIN KEY-----").is_err());
+        assert!(delete_key_content(key_id).is_ok());
     }
 }

@@ -5,6 +5,7 @@
 //! session and turned into a byte stream that the next hop's SSH handshake runs over
 //! (`russh::client::connect_stream`). This is the same mechanism `ssh -J` (ProxyJump)
 //! relies on.
+use crate::sync_ext::MutexExt;
 use crate::known_hosts::{self, Verdict};
 use crate::model::{AuthMethod, Host, HostId, Workspace};
 use crate::vault::{self, SecretKind};
@@ -64,7 +65,7 @@ impl client::Handler for AppHandler {
             Ok(Verdict::Mismatch {
                 previous_fingerprint,
             }) => {
-                *self.host_key_mismatch.lock().expect("lock poisoned") = Some(HostKeyMismatch {
+                *self.host_key_mismatch.lock_recover() = Some(HostKeyMismatch {
                     host_label: self.label.clone(),
                     previous_fingerprint,
                     offered_fingerprint: server_public_key.fingerprint(HashAlg::Sha256).to_string(),
@@ -86,8 +87,7 @@ impl client::Handler for AppHandler {
     ) -> Result<(), Self::Error> {
         let dest = self
             .remote_forward_routes
-            .lock()
-            .expect("lock poisoned")
+            .lock_recover()
             .get(&(connected_address.to_string(), connected_port))
             .cloned();
         let Some((dest_address, dest_port)) = dest else {
@@ -177,7 +177,7 @@ fn mismatch_error(
     mismatch: &Arc<Mutex<Option<HostKeyMismatch>>>,
     fallback: impl FnOnce() -> anyhow::Error,
 ) -> anyhow::Error {
-    match mismatch.lock().expect("lock poisoned").take() {
+    match mismatch.lock_recover().take() {
         Some(m) => anyhow::anyhow!(
             "la clé de l'hôte « {} » a changé : clé précédemment approuvée {}, clé reçue {}. \
              Si ce changement est inattendu, cela peut indiquer une usurpation (MITM) — vérifiez avant de continuer. \
@@ -208,15 +208,19 @@ async fn authenticate(
         AuthMethod::PrivateKey { path, key_id } => {
             let lookup_id = key_id.unwrap_or(host.id);
             let passphrase = vault::load(lookup_id, SecretKind::KeyPassphrase)?;
-            // Prefer embedded key content (stored at import time) over reading the file from disk.
+            // Prefer embedded key content over reading the file from disk: it lives
+            // in the encrypted master vault when unlocked, otherwise in the
+            // workspace (0600). Fall back to the original key file if neither has it.
             let key = if let Some(kid) = *key_id {
-                if let Some(content) = workspace
-                    .keychain
-                    .iter()
-                    .find(|k| k.id == kid)
-                    .and_then(|k| k.content.as_deref())
-                {
-                    decode_secret_key(content, passphrase.as_deref())
+                let stored = vault::load_key_content(kid)?.or_else(|| {
+                    workspace
+                        .keychain
+                        .iter()
+                        .find(|k| k.id == kid)
+                        .and_then(|k| k.content.clone())
+                });
+                if let Some(content) = stored {
+                    decode_secret_key(&content, passphrase.as_deref())
                         .map_err(|e| anyhow::anyhow!("could not decode stored key: {e}"))?
                 } else {
                     load_secret_key(path, passphrase.as_deref())

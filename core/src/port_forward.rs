@@ -1,5 +1,6 @@
 //! Local (`ssh -L`) and remote (`ssh -R`) TCP port forwarding over an
 //! established [`crate::ssh::Connection`].
+use crate::sync_ext::MutexExt;
 use crate::model::{PortForward, PortForwardKind};
 use crate::ssh::Connection;
 use std::sync::Arc;
@@ -29,8 +30,7 @@ impl ActiveForward {
             ActiveKind::Remote => {
                 connection
                     .remote_forward_routes()
-                    .lock()
-                    .expect("lock poisoned")
+                    .lock_recover()
                     .remove(&(
                         self.config.bind_address.clone(),
                         self.config.bind_port as u32,
@@ -123,8 +123,7 @@ async fn start_remote(
     // (see `AppHandler::server_channel_open_forwarded_tcpip`).
     connection
         .remote_forward_routes()
-        .lock()
-        .expect("lock poisoned")
+        .lock_recover()
         .insert(
             route_key.clone(),
             (forward.dest_address.clone(), forward.dest_port as u32),
@@ -137,8 +136,7 @@ async fn start_remote(
     {
         connection
             .remote_forward_routes()
-            .lock()
-            .expect("lock poisoned")
+            .lock_recover()
             .remove(&route_key);
         anyhow::bail!(
             "remote refused to forward {}:{}: {e}",

@@ -26,6 +26,7 @@ pub async fn list(pane: &PaneRef, path: &str) -> anyhow::Result<Vec<Entry>> {
 }
 
 pub async fn mkdir(pane: &PaneRef, cwd: &str, name: &str) -> anyhow::Result<()> {
+    sftp::ensure_safe_component(name)?;
     let path = sftp::join(cwd, name);
     match pane {
         PaneRef::Local => Ok(tokio::fs::create_dir(&path).await?),
@@ -39,6 +40,8 @@ pub async fn rename(
     old_name: &str,
     new_name: &str,
 ) -> anyhow::Result<()> {
+    sftp::ensure_safe_component(old_name)?;
+    sftp::ensure_safe_component(new_name)?;
     let from = sftp::join(cwd, old_name);
     let to = sftp::join(cwd, new_name);
     match pane {
@@ -53,6 +56,7 @@ pub async fn set_permissions(
     name: &str,
     mode: u32,
 ) -> anyhow::Result<()> {
+    sftp::ensure_safe_component(name)?;
     match pane {
         PaneRef::Local => anyhow::bail!(
             "le changement de permissions n'est pas pris en charge pour le système de fichiers local"
@@ -63,9 +67,19 @@ pub async fn set_permissions(
 
 /// Reads a file's whole content as text, for quick in-place editing.
 pub async fn read_text(pane: &PaneRef, cwd: &str, name: &str) -> anyhow::Result<String> {
+    sftp::ensure_safe_component(name)?;
     let path = sftp::join(cwd, name);
     match pane {
-        PaneRef::Local => Ok(tokio::fs::read_to_string(&path).await?),
+        PaneRef::Local => {
+            let len = tokio::fs::metadata(&path).await?.len();
+            if len > sftp::MAX_EDIT_BYTES {
+                anyhow::bail!(
+                    "fichier trop volumineux pour l'édition rapide (> {} Mo)",
+                    sftp::MAX_EDIT_BYTES / (1024 * 1024)
+                );
+            }
+            Ok(tokio::fs::read_to_string(&path).await?)
+        }
         PaneRef::Remote(client) => client.read_to_string(&path).await,
     }
 }
@@ -77,6 +91,7 @@ pub async fn write_text(
     name: &str,
     content: &str,
 ) -> anyhow::Result<()> {
+    sftp::ensure_safe_component(name)?;
     let path = sftp::join(cwd, name);
     match pane {
         PaneRef::Local => Ok(tokio::fs::write(&path, content).await?),
@@ -86,8 +101,13 @@ pub async fn write_text(
 
 /// Deletes `entry` (file or directory, recursively) from `cwd` on `pane`.
 pub async fn remove(pane: &PaneRef, cwd: &str, entry: &Entry) -> anyhow::Result<()> {
+    sftp::ensure_safe_component(&entry.name)?;
     let path = sftp::join(cwd, &entry.name);
-    match (pane, entry.is_dir) {
+    // A symlink is unlinked directly, never followed: descending into a
+    // symlink-to-directory would delete the *target's* contents, which can live
+    // entirely outside the tree being removed.
+    let is_real_dir = entry.is_dir && !entry.is_symlink;
+    match (pane, is_real_dir) {
         (PaneRef::Local, false) => Ok(tokio::fs::remove_file(&path).await?),
         (PaneRef::Local, true) => Ok(tokio::fs::remove_dir_all(&path).await?),
         (PaneRef::Remote(client), false) => client.remove_file(&path).await,
@@ -104,7 +124,8 @@ fn remove_remote_dir_recursive<'a>(
     Box::pin(async move {
         for child in client.list(path).await? {
             let child_path = sftp::join(path, &child.name);
-            if child.is_dir {
+            // Don't recurse through a symlinked directory — unlink the link itself.
+            if child.is_dir && !child.is_symlink {
                 remove_remote_dir_recursive(client, &child_path).await?;
             } else {
                 client.remove_file(&child_path).await?;
@@ -123,7 +144,11 @@ pub async fn copy_entry(
     dest: &PaneRef,
     dest_cwd: &str,
 ) -> anyhow::Result<()> {
-    if entry.is_dir {
+    sftp::ensure_safe_component(&entry.name)?;
+    // A symlink is copied as-is (its target's content for a file), never
+    // descended into: following a symlink-to-directory would recurse into a tree
+    // that may live entirely outside what the user asked to copy.
+    if entry.is_dir && !entry.is_symlink {
         return copy_dir(source, source_cwd, &entry.name, dest, dest_cwd).await;
     }
     match (source, dest) {
@@ -169,6 +194,7 @@ fn copy_dir<'a>(
     dest_dir: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
     Box::pin(async move {
+        sftp::ensure_safe_component(name)?;
         let src_path = sftp::join(source_dir, name);
         let dst_path = sftp::join(dest_dir, name);
 
@@ -189,7 +215,9 @@ fn copy_dir<'a>(
         };
 
         for child in entries {
-            if child.is_dir {
+            sftp::ensure_safe_component(&child.name)?;
+            // Don't descend into a symlinked directory (see `copy_entry`).
+            if child.is_dir && !child.is_symlink {
                 copy_dir(source, &src_path, &child.name, dest, &dst_path).await?;
             } else {
                 match (source, dest) {
@@ -239,6 +267,10 @@ async fn copy_remote_to_remote_file(
     dest_cwd: &str,
 ) -> anyhow::Result<()> {
     let tmp = std::env::temp_dir().join(format!("gui-termius-transfer-{}", uuid::Uuid::new_v4()));
+    // Pre-create the relay file 0600 so the copied bytes are never briefly
+    // world-readable in a shared /tmp; `download`'s `File::create` truncates it
+    // but preserves this owner-only mode on an existing file.
+    crate::secure_file::create_private(&tmp)?;
     let remote_src = sftp::join(source_cwd, name);
     src.download(&remote_src, &tmp, size, &never_cancel(), |_, _| {})
         .await?;
@@ -248,4 +280,36 @@ async fn copy_remote_to_remote_file(
         .await;
     let _ = tokio::fs::remove_file(&tmp).await;
     upload_result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_text_local_rejects_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("big.txt"),
+            vec![b'a'; (sftp::MAX_EDIT_BYTES + 1) as usize],
+        )
+        .await
+        .unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        assert!(
+            read_text(&PaneRef::Local, &cwd, "big.txt").await.is_err(),
+            "a file larger than the quick-edit cap must be refused, not loaded into memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_text_local_reads_a_small_file() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("small.txt"), b"bonjour")
+            .await
+            .unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let content = read_text(&PaneRef::Local, &cwd, "small.txt").await.unwrap();
+        assert_eq!(content, "bonjour");
+    }
 }

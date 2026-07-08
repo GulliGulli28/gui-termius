@@ -1,3 +1,4 @@
+use termius_core::sync_ext::MutexExt;
 use crate::state::{AppState, Pane};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -37,7 +38,7 @@ pub async fn open_pane(
         PaneSource::Local => {
             let cwd = termius_core::local_fs::home_dir();
             let entries = termius_core::local_fs::list(&cwd).map_err(|e| e.to_string())?;
-            state.panes.lock().expect("lock poisoned").insert(
+            state.panes.lock_recover().insert(
                 pane_id.clone(),
                 Pane {
                     connection: None,
@@ -51,7 +52,7 @@ pub async fn open_pane(
             })
         }
         PaneSource::Remote { host_id } => {
-            let workspace = state.workspace.lock().expect("lock poisoned").clone();
+            let workspace = state.workspace.lock_recover().clone();
             let connection = ssh::connect(&workspace, host_id)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -62,7 +63,7 @@ pub async fn open_pane(
             );
             let cwd = client.home_dir().await.map_err(|e| e.to_string())?;
             let entries = client.list(&cwd).await.map_err(|e| e.to_string())?;
-            state.panes.lock().expect("lock poisoned").insert(
+            state.panes.lock_recover().insert(
                 pane_id.clone(),
                 Pane {
                     connection: Some(connection),
@@ -80,7 +81,7 @@ pub async fn open_pane(
 
 #[tauri::command]
 pub fn close_pane(state: State<'_, AppState>, pane_id: String) -> Result<(), String> {
-    state.panes.lock().expect("lock poisoned").remove(&pane_id);
+    state.panes.lock_recover().remove(&pane_id);
     Ok(())
 }
 
@@ -91,7 +92,7 @@ pub struct PaneListed {
 }
 
 fn pane_ref(state: &AppState, pane_id: &str) -> Result<PaneRef, String> {
-    let panes = state.panes.lock().expect("lock poisoned");
+    let panes = state.panes.lock_recover();
     let pane = panes
         .get(pane_id)
         .ok_or_else(|| "pane inconnu".to_string())?;
@@ -276,8 +277,7 @@ pub async fn upload_paths(
         let cancel_flag = Arc::new(AtomicBool::new(false));
         state
             .transfers
-            .lock()
-            .expect("lock poisoned")
+            .lock_recover()
             .insert(transfer_id.clone(), cancel_flag.clone());
         ids.push(transfer_id.clone());
 
@@ -318,8 +318,7 @@ pub async fn upload_paths(
             app_handle
                 .state::<AppState>()
                 .transfers
-                .lock()
-                .expect("lock poisoned")
+                .lock_recover()
                 .remove(&id_for_task);
         });
     }
@@ -369,8 +368,7 @@ async fn upload_one(
 pub fn cancel_transfer(state: State<'_, AppState>, transfer_id: String) -> Result<(), String> {
     if let Some(flag) = state
         .transfers
-        .lock()
-        .expect("lock poisoned")
+        .lock_recover()
         .get(&transfer_id)
     {
         flag.store(true, Ordering::Relaxed);

