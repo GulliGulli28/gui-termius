@@ -355,6 +355,19 @@ est couvert par tests unitaires (`crypto.rs`, `master_vault.rs`).
   bug de l'app. Détail complet et commande exacte dans la section « Tests E2E
   réels » ci-dessus (piège `custom-protocol`).
 
+- **Écritures des fichiers de config = atomiques, obligatoirement.** Tout ce qui
+  écrit un fichier de config/secret passe par `secure_file::write_private`, qui
+  écrit un temp 0600 puis `rename` (atomique) — jamais une troncature-écriture
+  sur place. Deux raisons : (a) les lectures sont désormais *fail-closed* (un
+  `known_hosts.json`/`workspace.json` tronqué par un crash en cours d'écriture
+  serait refusé, verrouillant l'utilisateur hors de tous ses hôtes) ; (b) les
+  tests d'intégration `core/tests/` partagent le **vrai** `known_hosts.json`
+  (`ProjectDirs`, aucune isolation de chemin) et tournent en parallèle — une
+  écriture non atomique laisse un autre thread lire un fichier à moitié écrit.
+  C'est exactement ce qui a fait échouer `ssh_integration::bastion_chain…` en CI
+  (« Unknown server key ») une fois le fail-closed introduit. Ne pas revenir à un
+  `std::fs::write` direct pour ces fichiers.
+
 ## Roadmap / prochaines features (décidées avec l'utilisateur)
 
 Features majeures retenues, dans l'ordre de priorité restant :

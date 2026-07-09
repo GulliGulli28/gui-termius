@@ -40,10 +40,38 @@ pub fn open_private(path: &Path) -> std::io::Result<std::fs::File> {
     }
 }
 
-/// Writes `contents` to `path` with owner-only permissions (see [`open_private`]).
+/// Atomically writes `contents` to `path` with owner-only permissions: the bytes
+/// are written to a sibling temp file (0600) which is then renamed over `path`.
+///
+/// Readers therefore only ever observe the complete old or new file, never a
+/// half-written one. That matters because a truncated `known_hosts.json` /
+/// `workspace.json` is now treated as corruption (fail-closed) rather than
+/// silently ignored: an in-place truncate-then-write could otherwise lose all
+/// trusted host keys on a crash mid-write, or be read partially by a concurrent
+/// reader (the integration tests share one config dir and run in parallel).
 pub fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    open_private(path)?.write_all(contents)
+    let tmp = temp_sibling(path);
+    {
+        let mut file = open_private(&tmp)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// A unique temp path in the same directory as `path` (same filesystem, so the
+/// rename is atomic). Unique per call — the pid alone isn't enough since several
+/// threads can write the same file at once.
+fn temp_sibling(path: &Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp.{}.{}", std::process::id(), seq));
+    path.with_file_name(name)
 }
 
 /// Creates (or tightens to `0600`) an empty file at `path`. Used to pre-create a
