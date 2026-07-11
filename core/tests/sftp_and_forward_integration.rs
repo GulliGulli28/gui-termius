@@ -194,3 +194,73 @@ async fn remote_port_forward_reaches_a_local_service() {
 
     active.stop(&connection).await;
 }
+
+#[tokio::test]
+async fn dynamic_port_forward_reaches_a_local_service() {
+    let key = ClientKey::generate();
+    let sshd = TestSshd::start("fwd-dynamic", &key.public);
+    let host = test_host(&sshd, &key, "test-fwd-dynamic");
+    let host_id = host.id;
+
+    let mut workspace = Workspace::default();
+    workspace.hosts.push(host);
+    let connection = Arc::new(
+        ssh::connect(&workspace, host_id)
+            .await
+            .expect("connect should succeed"),
+    );
+
+    // A trivial echo service "behind" the SSH server, reachable only via the tunnel —
+    // same as the local-forward test, but this time the client picks it at connect time.
+    let echo_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let echo_port = echo_listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        if let Ok((mut stream, _)) = echo_listener.accept().await {
+            let mut buf = [0u8; 64];
+            if let Ok(n) = stream.read(&mut buf).await {
+                let _ = stream.write_all(&buf[..n]).await;
+            }
+        }
+    });
+
+    let local_bind_port = common::free_port();
+    let forward = PortForward {
+        id: Uuid::new_v4(),
+        host_id,
+        kind: PortForwardKind::Dynamic,
+        bind_address: "127.0.0.1".to_string(),
+        bind_port: local_bind_port,
+        dest_address: String::new(),
+        dest_port: 0,
+    };
+    let active = port_forward::start(connection.clone(), forward)
+        .await
+        .expect("start dynamic forward");
+
+    let mut client = TcpStream::connect(("127.0.0.1", local_bind_port))
+        .await
+        .expect("connect to SOCKS listener");
+
+    // SOCKS5 greeting: version 5, one method offered, "no authentication".
+    client.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+    let mut method_reply = [0u8; 2];
+    client.read_exact(&mut method_reply).await.unwrap();
+    assert_eq!(method_reply, [0x05, 0x00], "server should accept no-auth");
+
+    // CONNECT request to the echo service, addressed by IPv4.
+    let mut request = vec![0x05, 0x01, 0x00, 0x01];
+    request.extend_from_slice(&[127, 0, 0, 1]);
+    request.extend_from_slice(&echo_port.to_be_bytes());
+    client.write_all(&request).await.unwrap();
+
+    let mut connect_reply = [0u8; 10];
+    client.read_exact(&mut connect_reply).await.unwrap();
+    assert_eq!(connect_reply[1], 0x00, "CONNECT should succeed");
+
+    client.write_all(b"ping").await.unwrap();
+    let mut buf = [0u8; 4];
+    client.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"ping");
+
+    active.stop(&connection).await;
+}

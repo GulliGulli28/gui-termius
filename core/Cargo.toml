@@ -19,6 +19,23 @@ rand.workspace = true
 zeroize.workspace = true
 tracing.workspace = true
 async-trait = "0.1"
+# Key generation: an OS randomness source compatible with the `rand_core`
+# version `ssh-key` (a transitive dependency via `russh`) actually resolves
+# to — `russh::keys::ssh_key` doesn't re-export one itself.
+getrandom = { version = "0.4.3", features = ["sys_rng"] }
+bollard = "0.21"
+futures-util = "0.3"
+# `docker::connect_via_ssh`: speaks the Docker Engine API over a `russh` exec
+# channel (`docker system dial-stdio`) instead of a socket/TCP connection —
+# same major version bollard itself resolves (`hyper = "1.3"`, `hyper-util =
+# "0.1.5"`), so Cargo unifies rather than pulling in a second copy. Goes
+# through `hyper_util::client::legacy::Client` (not the lower-level
+# `hyper::client::conn` API — see `docker::connect_via_ssh`'s doc comment for
+# why that matters), same as bollard's own `http`/`pipe`/`ssh` transports
+# internally, hence the matching feature set.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["http1", "client-legacy", "tokio"] }
+tower-service = "0.3"
 # Master-password vault (optional, opt-in): Argon2id KDF + XChaCha20-Poly1305 AEAD.
 argon2 = "0.5"
 chacha20poly1305 = "0.10"

@@ -1,6 +1,13 @@
 # Rust build output
 /target
 /src-tauri/target
+# rdp-sidecar is its own separate Cargo workspace (see rdp-sidecar/Cargo.toml)
+/rdp-sidecar/target
+
+# Per-platform rdp-sidecar binary, built locally/in CI and copied here for
+# `bundle.externalBin` — never committed, see CLAUDE.md's "Pourquoi un
+# processus RDP séparé" section for the build command.
+/src-tauri/binaries/
 
 # Node
 /node_modules

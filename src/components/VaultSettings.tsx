@@ -31,6 +31,9 @@ export function VaultSettings({ status, onChange, preferences, onPreferencesChan
   const [changeConfirm, setChangeConfirm] = useState("");
   // Disable
   const [disablePw, setDisablePw] = useState("");
+  // Auto-lock delay — local draft so the field can be cleared while typing
+  // instead of snapping back to "0" on every keystroke (controlled input).
+  const [autoLockDraft, setAutoLockDraft] = useState<string | null>(null);
 
   const run = async (fn: () => Promise<void>, okMsg: string) => {
     setBusy(true);
@@ -131,14 +134,14 @@ export function VaultSettings({ status, onChange, preferences, onPreferencesChan
   const autoLock = preferences.masterVaultAutoLockMinutes ?? 0;
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2 rounded-lg bg-[var(--c-bg3)] p-3">
+      <div className="space-y-2 rounded-lg bg-[var(--c-bg3)] p-3">
         <p className="flex items-center gap-2 text-[13px] font-medium text-[var(--c-text)]">
-          <span className="h-2 w-2 rounded-full bg-emerald-400" /> Coffre chiffré actif — déverrouillé
+          <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400" /> Coffre chiffré actif — déverrouillé
         </p>
         <button
           disabled={busy}
           onClick={() => run(() => api.lockVault(), "Coffre verrouillé.")}
-          className="shrink-0 rounded-md bg-[var(--c-bg2)] px-2.5 py-1.5 text-[12px] font-medium text-[var(--c-text-secondary)] hover:bg-white/5 disabled:opacity-50"
+          className="w-full rounded-md bg-[var(--c-bg2)] px-3 py-1.5 text-[12px] font-medium text-[var(--c-text-secondary)] hover:bg-white/5 disabled:opacity-50"
         >
           Verrouiller maintenant
         </button>
@@ -147,18 +150,27 @@ export function VaultSettings({ status, onChange, preferences, onPreferencesChan
       {noticeBanner}
 
       <div className="space-y-2 rounded-lg bg-[var(--c-bg3)] p-3">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-[13px] text-[var(--c-text-secondary)]">Verrouillage auto après inactivité</span>
-          <div className="flex items-center gap-1.5">
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
             <input
               type="number"
               min={0}
               max={240}
-              value={autoLock}
-              onChange={(e) => onPreferencesChange({ ...preferences, masterVaultAutoLockMinutes: Math.max(0, Math.min(240, Number(e.target.value) || 0)) })}
-              className="w-16 rounded-md bg-[var(--c-bg2)] px-2 py-1 text-right text-[12px] text-[var(--c-text)] focus:outline-none focus:ring-1 focus:ring-[var(--c-accent-hover)]"
+              value={autoLockDraft ?? String(autoLock)}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setAutoLockDraft(raw);
+                if (raw === "") return;
+                onPreferencesChange({ ...preferences, masterVaultAutoLockMinutes: Math.max(0, Math.min(240, Number(raw) || 0)) });
+              }}
+              onBlur={() => {
+                if (autoLockDraft === "") onPreferencesChange({ ...preferences, masterVaultAutoLockMinutes: 0 });
+                setAutoLockDraft(null);
+              }}
+              className="w-16 shrink-0 rounded-md bg-[var(--c-bg2)] px-2 py-1 text-right text-[12px] text-[var(--c-text)] focus:outline-none focus:ring-1 focus:ring-[var(--c-accent-hover)] [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
             />
-            <span className="text-[12px] text-[var(--c-text-muted)]">min</span>
+            <span className="shrink-0 text-[12px] text-[var(--c-text-muted)]">min</span>
           </div>
         </div>
         <p className="text-[12px] leading-relaxed text-[var(--c-text-muted)]">{autoLock === 0 ? "Désactivé — le coffre reste déverrouillé jusqu'à la fermeture de l'application." : `Le coffre se verrouille après ${autoLock} min sans activité.`}</p>

@@ -3,7 +3,7 @@ use crate::state::AppState;
 use serde::Deserialize;
 use tauri::State;
 use termius_core::model::{
-    AuthMethod, CustomIcon, EnvVar, Group, GroupId, Host, HostId, KeyId, PortForward,
+    AuthMethod, CustomIcon, EnvVar, Group, GroupId, Host, HostId, HostKind, KeyId, PortForward,
     PortForwardId, PrivateKey, Snippet, SnippetId, Workspace,
 };
 use termius_core::store;
@@ -19,10 +19,14 @@ pub fn get_workspace(state: State<'_, AppState>) -> Workspace {
 pub struct SaveHostInput {
     pub id: Option<HostId>,
     pub label: String,
+    #[serde(default)]
+    pub kind: HostKind,
     pub address: String,
     pub port: u16,
     pub username: String,
     pub auth: AuthMethod,
+    #[serde(default)]
+    pub docker_via_host_id: Option<HostId>,
     pub jump_via: Vec<HostId>,
     pub group_id: Option<GroupId>,
     pub tags: Vec<String>,
@@ -49,10 +53,12 @@ pub fn save_host(state: State<'_, AppState>, input: SaveHostInput) -> Result<Wor
         Some(id) => {
             if let Some(host) = workspace.hosts.iter_mut().find(|h| h.id == id) {
                 host.label = input.label;
+                host.kind = input.kind;
                 host.address = input.address;
                 host.port = input.port;
                 host.username = input.username;
                 host.auth = input.auth.clone();
+                host.docker_via_host_id = input.docker_via_host_id;
                 host.jump_via = input.jump_via;
                 host.group_id = input.group_id;
                 host.tags = input.tags;
@@ -66,8 +72,10 @@ pub fn save_host(state: State<'_, AppState>, input: SaveHostInput) -> Result<Wor
         }
         None => {
             let mut host = Host::new(input.label, input.address, input.username);
+            host.kind = input.kind;
             host.port = input.port;
             host.auth = input.auth.clone();
+            host.docker_via_host_id = input.docker_via_host_id;
             host.jump_via = input.jump_via;
             host.group_id = input.group_id;
             host.tags = input.tags;

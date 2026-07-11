@@ -10,6 +10,7 @@ import { BroadcastBar } from "./components/BroadcastBar";
 import { TerminalTab, type TerminalTabHandle } from "./components/TerminalTab";
 import { LocalTerminalTab } from "./components/LocalTerminalTab";
 import { TransferTab } from "./components/TransferTab";
+import { RdpTab } from "./components/RdpTab";
 import { TitleBar } from "./components/TitleBar";
 import { type AppPreferences, type UiAccent, ACCENT_COLORS, BG_THEMES, loadPreferences, savePreferences } from "./lib/preferences";
 import { SplitPane } from "./components/SplitPane";
@@ -259,10 +260,14 @@ export default function App() {
   const refreshWorkspace = useCallback((next: Workspace) => setWorkspace(next), []);
 
   // ── Tab management ───────────────────────────────────────────────────────
-  const openTab = useCallback((kind: "terminal" | "transfer", host: Host) => {
+  const openTab = useCallback((kind: "terminal" | "transfer" | "rdp-view", host: Host, dockerContainerId?: string) => {
     const id = `tab-${nextTabId++}`;
-    const label = kind === "terminal" ? host.label : `Transfert : ${host.label}`;
-    setTabs((prev) => [...prev, { id, kind, hostId: host.id, label }]);
+    const label = kind === "transfer"
+      ? `Transfert : ${host.label}`
+      : kind === "rdp-view"
+        ? `Aperçu : ${host.label}`
+        : (dockerContainerId ? `${host.label} : ${dockerContainerId}` : host.label);
+    setTabs((prev) => [...prev, { id, kind, hostId: host.id, label, dockerContainerId }]);
     setActiveTabId(id);
   }, []);
 
@@ -293,7 +298,7 @@ export default function App() {
         return [{ id, kind: "local-terminal", label: p.label, status: "placeholder" }];
       }
       if (!p.hostId || !workspace.hosts.some((h) => h.id === p.hostId)) return [];
-      return [{ id, kind: p.kind, hostId: p.hostId, label: p.label, status: "placeholder" }];
+      return [{ id, kind: p.kind, hostId: p.hostId, label: p.label, status: "placeholder", dockerContainerId: p.dockerContainerId }];
     });
     if (restored.length > 0) {
       setTabs(restored);
@@ -599,6 +604,8 @@ export default function App() {
             onPanelChange={setSidebarPanel}
             activeHostId={activeHostId}
             onConnect={(host) => openTab("terminal", host)}
+            onConnectDocker={(host, containerId) => openTab("terminal", host, containerId)}
+            onConnectRdpView={(host) => openTab("rdp-view", host)}
             onOpenTransfer={(host) => openTab("transfer", host)}
             onOpenLocalTerminal={(shell) => openLocalTerminal(undefined, shell)}
             onQuickSSH={(cmd) => openLocalTerminal(cmd)}
@@ -617,6 +624,7 @@ export default function App() {
             onAddForward={(input) => api.addForward(input).then(refreshWorkspace).catch((e) => reportError(String(e)))}
             onDeleteForward={(id) => api.deleteForward(id).then(refreshWorkspace).catch((e) => reportError(String(e)))}
             onAddKey={(name, path, passphrase) => api.addPrivateKey(name, path, passphrase).then(refreshWorkspace).catch((e) => reportError(String(e)))}
+            onGenerateKey={(name, algorithm, passphrase) => api.generatePrivateKey(name, algorithm, passphrase).then(refreshWorkspace).catch((e) => reportError(String(e)))}
             onDeleteKey={(id) => api.deletePrivateKey(id).then(refreshWorkspace).catch((e) => reportError(String(e)))}
             onRenameKey={(id, name) => api.renamePrivateKey(id, name).then(refreshWorkspace).catch((e) => reportError(String(e)))}
             onError={reportError}
@@ -704,11 +712,14 @@ export default function App() {
                           preferences={preferences}
                           onDisconnect={() => closeTab(tab.id, "disconnected")}
                           onInputData={(data) => mirrorInput(tab.id, data)}
+                          dockerContainerId={tab.kind === "terminal" ? tab.dockerContainerId : undefined}
                           ref={(handle) => {
                             if (handle) terminalRefs.current.set(tab.id, handle);
                             else terminalRefs.current.delete(tab.id);
                           }}
                         />
+                      ) : tab.kind === "rdp-view" ? (
+                        <RdpTab host={host} isActive={isActive} preferences={preferences} onDisconnect={() => closeTab(tab.id)} />
                       ) : (
                         <TransferTab host={host} workspace={workspace} preferences={preferences} onError={reportError} />
                       )}

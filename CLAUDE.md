@@ -277,6 +277,512 @@ Ne pas tester le flux complet activer→migrer→se-connecter en E2E automatique
 il faut un vrai `sshd` ET ça mut­erait le `secrets.enc` réel du profil. Le crypto
 est couvert par tests unitaires (`crypto.rs`, `master_vault.rs`).
 
+## RDP intégré (rendu réel) : architecture sidecar
+
+Le rendu RDP intégré (`RdpTab.tsx`, onglet « Aperçu intégré ») ne tourne
+**pas** dans le binaire principal `gui-termius` : c'est un processus séparé,
+`rdp-sidecar`, lancé par `commands/rdp_view.rs` et piloté par un protocole
+maison sur stdin/stdout (`rdp-ipc`). Ce n'est pas un choix d'architecture
+arbitraire — c'est la seule option qui compile, pour une raison précise
+détaillée ci-dessous. Le mode « lanceur » historique (`core/src/rdp.rs`,
+commande `connect_rdp`, bouton principal des hôtes RDP — shell-out vers
+`mstsc.exe`/`xfreerdp`) reste en place tel quel et reste l'action par défaut,
+accessible en un clic ; l'aperçu intégré (phase 2 : affichage + souris/
+clavier, toujours pas de presse-papiers/audio/lecteurs partagés) reste une
+action secondaire, pas un remplacement.
+
+### Pourquoi un processus RDP séparé
+
+`ironrdp-connector` (client RDP) dépend transitivement de `picky`
+(`picky-asn1-x509`), qui pin une version *exacte* de `ecdsa`
+(`=0.17.0-rc.22` au moment d'écrire ceci). `russh` — déjà utilisé partout
+dans `core/` pour SSH — pin lui aussi une version exacte, mais différente
+(`=0.17.0-rc.18`). Deux pins exacts différents de la même crate dans un seul
+graphe de dépendances Cargo ne peuvent **jamais** être résolus : ce n'est pas
+une histoire de version « pas encore assez récente » (vérifié aussi bien sur
+la dernière version publiée de `picky` que sur sa branche `master` — toujours
+désaligné avec `russh`), donc pas un problème qu'un `cargo update` ou
+l'attente d'un futur release réglerait. Toute tentative d'ajouter
+`ironrdp-connector` comme dépendance directe ou transitive de `core/` (ou de
+tout crate qui dépend de `core/`, donc `src-tauri` inclus) échoue la
+résolution Cargo dès `cargo check`.
+
+**Un membre de workspace n'isole rien.** Première tentative : mettre
+`rdp-sidecar` dans le workspace racine (`members = [...]`) sans le faire
+dépendre de `core`/`russh`, en supposant que l'absence de dépendance directe
+suffirait. Ça échoue avec exactement la même erreur `ecdsa` : Cargo résout
+**un seul** graphe de dépendances unifié pour tous les membres d'un même
+workspace, qu'ils dépendent les uns des autres ou non. La seule vraie
+isolation est un `[workspace]` **séparé** — son propre `Cargo.lock` — relié
+au reste du dépôt uniquement par une dépendance `path = "..."` ordinaire vers
+un crate qui n'a lui-même aucune dépendance à risque. C'est exactement la
+structure ici :
+
+```
+Cargo.toml (workspace racine : core, src-tauri, rdp-ipc)
+  └─ src-tauri dépend de rdp-ipc (path) — jamais de rdp-sidecar
+rdp-sidecar/Cargo.toml ([workspace] séparé, members = ["."])
+  └─ dépend de rdp-ipc (path) + ironrdp — jamais de core/russh
+```
+
+`rdp-ipc` (protocole de communication, voir plus bas) ne dépend que de
+`tokio`/`serde`/`serde_json` — sûr à partager tel quel entre les deux
+workspaces sans jamais réintroduire le conflit.
+
+### Build : ce qui est déjà vérifié, ce qui ne l'est pas
+
+`rdp-sidecar` compile et passe `cargo clippy --all-targets -- -D warnings`
+propre, à la fois sous WSL (`x86_64-unknown-linux-gnu`) et nativement sous
+Windows (`x86_64-pc-windows-msvc`, testé le 2026-07-10 en conditions réelles
+sur cette machine — `ironrdp-tokio`'s feature `reqwest-rustls-ring` utilise
+`ring`, qui a lui aussi besoin de NASM pour ses routines assembleur sous
+MSVC, déjà installé sur cette machine pour la même raison que `aws-lc-sys`
+— voir la section E2E). Ce qui n'est **pas** vérifié : une vraie connexion
+contre un serveur RDP réel (aucun accessible dans cet environnement — même
+limitation que le mode lanceur). La logique de connexion/décodage a été
+portée depuis `ironrdp-client/src/rdp.rs` (le client de référence du dépôt
+`Devolutions/IronRDP`) en vérifiant chaque type/signature contre les sources
+de la version réellement résolue par Cargo plutôt que par mémoire — un
+premier essai basé sur une version plus récente de l'API que celle
+effectivement résolue (`ActiveStageBuilder`, `AsyncReadWrite` exporté par
+`ironrdp-tokio`) a échoué à la compilation et a dû être corrigé contre les
+sources réelles (`ActiveStage::new(connection_result)` direct, trait
+`AsyncReadWrite` local à définir soi-même — absent de `ironrdp-tokio`).
+
+**Bug réel trouvé au premier test interactif** (2026-07-10, via `npx tauri
+dev` + un vrai clic sur « Aperçu intégré » — exactement le genre de chose
+qu'aucune compilation/clippy ne peut attraper) : le process `rdp-sidecar`
+plantait immédiatement à la première tentative de connexion avec *"Could
+not automatically determine the process-level CryptoProvider from Rustls
+crate features"*. Cause : `ironrdp-tls`'s chemin rustls appelle
+`ClientConfig::builder()` (le constructeur « process default »), qui panique
+si aucun `CryptoProvider` n'a été installé — et rustls 0.23 refuse de choisir
+implicitement dès que plus d'un provider (`ring` et `aws-lc-rs`) se retrouve
+dans le graphe de dépendances, ce qui est le cas ici (`reqwest`/`ironrdp-tls`
+ne s'accordent pas sur un défaut). Fix : dépendance directe sur `rustls`
+(juste pour appeler l'API) + `rustls::crypto::ring::default_provider()
+.install_default()` tout au début de `main()`, avant toute connexion — voir
+`rdp-sidecar/src/main.rs`. Ce genre de panique runtime-only, invisible à
+`cargo check`/`clippy`, est exactement pourquoi la mention « non testé contre
+un vrai serveur » plus haut est prise au sérieux plutôt que traitée comme un
+détail — le code compilait proprement et plantait quand même dès le premier
+usage réel.
+
+Pour builder `rdp-sidecar` (son propre workspace, donc `cd` dedans avant
+toute commande `cargo`) :
+
+```bash
+# WSL/Linux
+wsl.exe -e bash -lc "cd ~/gui-termius/rdp-sidecar && cargo build --release"
+```
+```powershell
+# Windows natif (mêmes pièges de PATH/NASM que la section E2E)
+$env:PATH += ";$env:USERPROFILE\.cargo\bin;C:\Program Files\NASM"
+Set-Location "\\wsl.localhost\Ubuntu-24.04\home\glorin\gui-termius\rdp-sidecar"
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" build --release
+```
+
+### Où placer le binaire compilé
+
+`tauri.conf.json` déclare `bundle.externalBin: ["binaries/rdp-sidecar"]`.
+Deux emplacements différents comptent, pour deux étapes différentes :
+
+- **Pour `tauri build`/`tauri-action`** (packaging, `release.yml`) : le
+  binaire compilé doit être copié vers
+  `src-tauri/binaries/rdp-sidecar-<triple-cible>[.exe]` (suffixe de triple
+  obligatoire — c'est ainsi que `tauri build` sait choisir le bon binaire par
+  plateforme). `release.yml` le fait déjà pour les deux plateformes du
+  matrix, juste avant l'étape `tauri-action`.
+- **Pour un `cargo build` direct côté `src-tauri`, ou `cargo run`/`tauri
+  dev`** : `tauri_plugin_shell::Command::sidecar()` résout le binaire au
+  runtime en le cherchant **à côté de l'exécutable principal en cours
+  d'exécution, sans suffixe de triple**
+  (`<dossier de gui-termius[.exe]>/rdp-sidecar[.exe]`, donc
+  `target/debug/rdp-sidecar` en dev). Contrairement à ce qu'on pourrait
+  supposer, ce n'est **pas** une copie faite par la CLI `tauri dev`/`tauri
+  build` elle-même — c'est `tauri-build`'s `build.rs` (déclaré en
+  `[build-dependencies]` de `src-tauri`, donc déclenché par **n'importe
+  quel** `cargo build`/`cargo check`/`cargo run` sur `gui-termius`, CLI
+  Tauri ou pas) qui copie automatiquement depuis
+  `src-tauri/binaries/rdp-sidecar-<triple-hôte>[.exe]` vers cet emplacement
+  sans suffixe. Vérifié le 2026-07-10 : supprimer
+  `target/debug/rdp-sidecar` puis relancer un `cargo build -p gui-termius`
+  ne le recrée pas tant que `build.rs` n'a pas de raison de re-tourner (il
+  ne re-tourne que sur ses `rerun-if-changed`, notamment `tauri.conf.json`
+  et `capabilities/`) ; forcer sa ré-exécution (`touch tauri.conf.json`)
+  recrée bien la copie automatiquement, sans intervention manuelle. Donc :
+  **la seule chose à placer à la main** est le binaire triple-suffixé dans
+  `src-tauri/binaries/` (voir ci-dessous) — dès qu'il y est, n'importe quel
+  `cargo build`/`cargo run`/`tauri dev` sur `gui-termius` qui redéclenche
+  `build.rs` s'occupe de la copie finale. Exemple WSL (chemin utilisé pour
+  le test E2E réel du 2026-07-10) :
+  ```bash
+  wsl.exe -e bash -lc "cd ~/gui-termius/rdp-sidecar && cargo build && \
+    cp target/debug/rdp-sidecar ../src-tauri/binaries/rdp-sidecar-x86_64-unknown-linux-gnu"
+  ```
+  **Piège** : ce même `build.rs` vérifie que le chemin `bundle.externalBin`
+  existe **même pour un simple `cargo check`** sur `gui-termius` — sans le
+  fichier triple-suffixé ci-dessus déjà en place, même la compilation du
+  crate principal échoue (`resource path "binaries/rdp-sidecar-<triple>"
+  doesn't exist`), pas seulement le packaging. `src-tauri/binaries/` est
+  gitignored (binaire par plateforme, jamais committé) — après un `git
+  clone` frais ou un changement de plateforme de build, ce binaire doit
+  être reconstruit et recopié avant que `cargo check`/`cargo build`/`tauri
+  dev` sur `gui-termius` refonctionne.
+
+  `npx tauri dev` fonctionne pour tester l'app avec ce sidecar déjà en
+  place, lancé depuis WSL (vérifié le 2026-07-10 : `beforeDevCommand`
+  démarre Vite, `cargo run` compile et lance une vraie fenêtre WebKitGTK,
+  aucune erreur liée au sidecar). Deux limites à garder en tête : (a) ça
+  reste le rendu **WebKitGTK** (voir le tableau de la section E2E), pas
+  WebView2 — pour tester le rendu que les utilisateurs auront réellement il
+  faut le binaire Windows (`rdp-sidecar-x86_64-pc-windows-msvc.exe`, même
+  procédure de build que la section précédente) et lancer `npx tauri dev`
+  **depuis PowerShell natif**, jamais testé sur cette machine ; vu le piège
+  déjà documenté (`npm run ...` échoue sur un `cwd` UNC, section E2E), ça
+  pourrait buter sur la même limitation — à vérifier avant de compter
+  dessus. (b) `tauri dev` ne teste que le lancement du process sidecar et
+  la connexion IPC/UI — **pas une vraie session RDP** : il faut un hôte de
+  type RDP déjà configuré dans l'app (avec un mot de passe enregistré) et
+  un serveur RDP réellement joignable, ce qu'aucun environnement de dev
+  utilisé jusqu'ici ne fournit.
+
+### CI : ce que `--workspace` ne couvre pas
+
+Les commandes `cargo clippy --workspace`/`cargo build --workspace` du job
+`windows-workspace` (`.github/workflows/ci.yml`) résolvent le workspace
+racine (`core` + `src-tauri` + `rdp-ipc`) — **elles ne touchent jamais
+`rdp-sidecar`**, exactement pour la raison qui a motivé sa séparation
+(isolation de workspace). Il n'y a pour l'instant **aucun job CI dédié** qui
+compile/lint `rdp-sidecar` : un warning clippy ou une régression de
+compilation là-dedans passerait inaperçu jusqu'à ce que quelqu'un tente une
+release. À ajouter si ce code continue d'évoluer (job séparé, `cd
+rdp-sidecar && cargo clippy --all-targets -- -D warnings`, sur
+`ubuntu-latest` a minima — Windows recommandé aussi vu le lien avec
+`ring`/NASM ci-dessus).
+
+### Protocole `rdp-ipc`
+
+`rdp-ipc/src/lib.rs` définit la trame entre les deux processus, dans les deux
+sens, testée par 10 tests unitaires (`tokio::io::duplex`, aucun process réel
+nécessaire) :
+- **stdin du sidecar** : d'abord une unique ligne JSON `ConnectRequest {
+  host, port, username, password }`, envoyée une fois au lancement, puis un
+  flux continu de lignes JSON `ClientMessage` pour le reste de la vie du
+  process — `MouseMove { x, y }`, `MouseButton { x, y, button, pressed }`
+  (`button` = `MouseEvent.button` DOM brut), `MouseWheel { x, y, deltaY }`,
+  `Key { code, pressed }` (`code` = `KeyboardEvent.code` DOM, indépendant du
+  layout clavier), `ReleaseAll` (relâche tout côté serveur — envoyé par
+  `RdpTab.tsx` sur perte de focus/visibilité, pour éviter une touche/bouton
+  qui reste « collé »). **Piège vérifié empiriquement, pas juste supposé** :
+  `#[serde(rename_all = "camelCase")]` sur un enum à tag interne ne renomme
+  que les noms de variantes (la valeur de `"type"`), **pas** les champs des
+  variantes struct — `delta_y` restait `delta_y` en JSON malgré l'attribut
+  d'enum, nécessitant un `#[serde(rename = "deltaY")]` explicite sur ce
+  champ précis. Un décalage de casse ici échoue silencieusement côté
+  désérialisation Rust (aucune erreur de compilation d'aucun côté) ; couvert
+  par un test dédié (`mouse_wheel_delta_y_field_is_camel_case_on_the_wire`)
+  plutôt que seulement par le roundtrip Rust→Rust (qui ne prouve rien sur la
+  casse réelle du JSON, seulement que l'écriture et la lecture Rust
+  s'accordent entre elles).
+- **stdout du sidecar** : une suite de `SidecarMessage` — `Image { width,
+  height, pixels }` (RGBA8 brut, toute l'image renvoyée à chaque mise à jour,
+  pas de diff — simple et correct pour l'instant, à revisiter si la bande
+  passante devient un problème réel), `Error(String)`, ou `Closed` — encodés
+  en tag-byte + longueur préfixée (pas de framing texte, contrairement à
+  `ConnectRequest`/`ClientMessage` : les pixels bruts pourraient contenir
+  n'importe quel octet, y compris `\n`).
+
+Côté `rdp-sidecar`, `main.rs` garde `stdin` ouvert après avoir lu le
+`ConnectRequest` et lance une tâche séparée qui boucle sur
+`ClientMessage::read_from` jusqu'à fermeture/erreur, poussant chaque message
+dans un `mpsc::unbounded_channel` — lu par `active_session`'s `tokio::select!`
+en parallèle de `reader.read_pdu()`. Piège évité : un `mpsc::Receiver` fermé
+renvoie `None` immédiatement à *chaque* poll, donc le sélectionner sans
+précaution ferait tourner la boucle en boucle infinie CPU dès que stdin se
+ferme — `recv_or_pending` bascule la branche sur un `std::future::pending()`
+après le premier `None`, qui ne se résout plus jamais.
+
+La conversion `ClientMessage` → PDU RDP passe par `ironrdp::input` (feature
+`input` de la crate `ironrdp`, alias vers `ironrdp-input`) : son
+`Database::apply(operations)`/`release_all()` porte déjà toute la machine à
+états presser/relâcher et l'encodage en `FastPathInputEvent`, y compris
+`MouseButton::from_web_button()` qui convertit directement la valeur DOM
+`MouseEvent.button`. La seule pièce qu'il ne fournit pas : convertir
+`KeyboardEvent.code` (ex. `"KeyA"`, `"ArrowLeft"`) en scancode PS/2 Set 1 —
+table faite à la main dans `rdp-sidecar/src/input.rs::scancode_for`, capable
+mais pas exhaustive (couvre lettres/chiffres/ponctuation/flèches/modifieurs/
+F1-F12/pavé numérique ; touches média et impr-écran volontairement absentes).
+Un code non reconnu est silencieusement ignoré plutôt que deviné.
+
+Côté `commands/rdp_view.rs`, le sidecar est lancé via
+`app.shell().sidecar("rdp-sidecar")` (`tauri_plugin_shell`) avec
+`.set_raw_out(true)` — **obligatoire** : sans ce flag, le plugin découpe
+stdout ligne par ligne pour le mode par défaut (pensé pour des logs texte),
+ce qui corromprait silencieusement le framing binaire de `SidecarMessage` dès
+qu'un octet `\n`/`\r` apparaît dans des pixels ou une longueur. Les
+`CommandEvent::Stdout` bruts (chunks de taille arbitraire, pas alignés sur
+les trames) sont réassemblés via un `tokio::io::duplex()` : un premier task
+recopie les chunks dedans, un second relit des `SidecarMessage` complets avec
+`rdp_ipc::SidecarMessage::read_from` — réutilisant le même parseur testé côté
+`rdp-ipc`, plutôt que de dupliquer la logique de framing dans
+`rdp_view.rs`. Chaque `SidecarMessage::Image` est réémis vers le frontend en
+événement Tauri `rdp-view-frame` (pixels ré-encodés en base64, même
+convention que `terminal-data`) ; `RdpTab.tsx` les peint directement sur un
+`<canvas>` via `ImageData`/`putImageData` — pas de bibliothèque de rendu.
+
+**Aucune entrée de capability n'est nécessaire** dans
+`src-tauri/capabilities/default.json` pour `tauri-plugin-shell` : les
+permissions de capacités ne gouvernent que les appels `invoke()` du
+frontend vers les commandes *du plugin lui-même* (`plugin:shell|spawn`,
+etc.) — jamais utilisées ici. `app.shell().sidecar(...)` est appelé
+uniquement côté Rust, à l'intérieur de la commande `connect_rdp_view` (elle
+déjà exposée au frontend via `invoke_handler`, comme toute commande maison
+de ce projet) : c'est un appel Rust-vers-Rust qui ne passe jamais par le pont
+IPC/capabilities.
+
+### Portée phase 2 et limites connues
+
+Le forward souris/clavier (`send_rdp_view_input`, `RdpTab.tsx`) est
+implémenté et a été **validé pour de vrai contre un serveur RDP réel** le
+2026-07-10 par l'utilisateur (voir plus haut : premier test réel avait
+révélé le bug de `CryptoProvider`, corrigé, puis une connexion + interaction
+réelles ont fonctionné, via `npx tauri dev` sous WSL). Côté frontend,
+`RdpTab.tsx` :
+- Coalesce `mousemove` à une frame d'animation max (`requestAnimationFrame`)
+  plutôt que d'envoyer un événement IPC par pixel parcouru.
+- Capture le relâchement de bouton au niveau `window`, pas juste sur le
+  `<canvas>` : un drag qui sort du canvas avant le `mouseup` doit quand même
+  être vu, sinon le bouton reste « collé » côté serveur RDP.
+- Attache `wheel` manuellement via `addEventListener(..., { passive: false
+  })` plutôt que la prop JSX `onWheel` — React délègue cet événement en mode
+  passif par défaut (perf de scroll), ce qui rendrait `preventDefault()`
+  silencieusement sans effet et laisserait la page défiler au lieu de la
+  session distante.
+- Réutilise `shouldBubbleToShortcut` (`lib/shortcuts.ts`, même mécanisme que
+  `TerminalTab`) pour laisser passer les raccourcis de l'appli (changement
+  d'onglet, etc.) plutôt que de tout intercepter aveuglément.
+- Envoie `ReleaseAll` quand la vue perd le focus ou que l'onglet devient
+  inactif, pour éviter qu'une touche modificatrice reste « enfoncée » côté
+  serveur après un alt-tab ou un changement d'onglet.
+
+**Presse-papiers (CLIPRDR) — synchronisation automatique bidirectionnelle,
+Windows uniquement.** Option volontairement plus ambitieuse que le forward
+souris/clavier : l'utilisateur a explicitement choisi cette voie plutôt
+qu'une alternative plus simple (déclenchement manuel du côté local→distant)
+après que je lui aie présenté les deux avec leurs coûts respectifs. Entièrement
+contenu dans `rdp-sidecar` (`clipboard.rs`) — **aucun nouveau message
+`rdp-ipc`, aucune nouvelle commande Tauri, aucun changement frontend** : le
+sidecar parle directement au presse-papiers OS, une ressource partagée au
+niveau du système donc déjà visible de n'importe quel process, pas besoin de
+la faire transiter par l'app principale.
+
+- `ironrdp-cliprdr-native`'s `WinClipboard` (Windows) fait tout le travail
+  OS-spécifique (lecture/écriture réelle du presse-papiers, négociation de
+  format) ; `StubClipboard` (toute autre plateforme) est un backend complet
+  qui ne fait rien plutôt qu'une implémentation partielle — le canal CLIPRDR
+  est quand même négocié avec le serveur, il ne produit/n'accepte simplement
+  jamais de données. Aucune capacité fichier n'est annoncée par l'un ou
+  l'autre (`client_capabilities()` renvoie `empty()`), donc pas de transfert
+  de fichiers par presse-papiers — texte seulement.
+- **Piège central, propre à ce choix** : `WinClipboard` s'appuie sur
+  `WM_CLIPBOARDUPDATE` livré à une fenêtre cachée qu'elle possède — ce qui
+  exige qu'un vrai thread Win32 tourne une boucle de messages
+  (`GetMessageW`/`TranslateMessage`/`DispatchMessageW`) quelque part dans le
+  process. `rdp-sidecar` est un process tokio pur, sans jamais aucune boucle
+  de messages Win32 — contrairement à `ironrdp-client` (le client de
+  référence) qui en a une gratuitement via sa propre fenêtre applicative
+  (winit). Solution : un thread OS dédié (`std::thread::spawn`, jamais
+  joint — tourne pour toute la durée du process), sur lequel `WinClipboard`
+  est créée (elle est `!Send` : liée à la fenêtre/au thread qui l'a créée,
+  ne peut pas être construite ailleurs puis déplacée) et où la boucle de
+  messages tourne indéfiniment. Le `backend_factory()` qu'elle produit, lui,
+  est `Send` et remonte vers le monde async via un `tokio::sync::oneshot`
+  attendu avec un simple `.await` — pas de `blocking_recv()` ni d'autre
+  primitive de blocage à l'intérieur du runtime tokio.
+- Les messages sortants (`ClipboardMessage::SendInitiateCopy`/
+  `SendFormatData`/`SendInitiatePaste`, émis par le backend quand le
+  presse-papiers local change ou que le serveur demande des données)
+  remontent via un `mpsc::UnboundedSender` — sûr à appeler depuis un thread
+  non-tokio, `send()` n'est pas bloquant et ne requiert pas d'exécuteur.
+  Troisième branche du `tokio::select!` de `active_session` (même piège
+  « channel fermé = busy-loop » que pour `input_rx`, `recv_or_pending`
+  généralisé pour servir les deux) : dépile ces messages et pilote
+  `active_stage.get_svc_processor_mut::<CliprdrClient>()` (`initiate_copy`/
+  `submit_format_data`/`initiate_paste`) pour produire la trame à envoyer.
+- **Vérifié** : compilation + `clippy --all-targets -- -D warnings` propres
+  à la fois sous WSL (chemin `StubClipboard`, aucun appel Win32) et
+  nativement sous Windows (chemin `WinClipboard` réel, y compris les appels
+  `unsafe` à `GetMessageW`/`DispatchMessageW` — leurs signatures exactes
+  dans `windows` 0.62.2 n'étaient pas connues à l'avance, vérifiées par la
+  compilation plutôt que par mémoire). **Validé pour de vrai le 2026-07-10**
+  par l'utilisateur, copier-coller dans les deux sens, contre un vrai
+  serveur RDP — nativement sous Windows (`gui-termius.exe` natif pointé sur
+  le serveur Vite de WSL, port-forwarding WSL2 automatique confirmé
+  fonctionnel plutôt que supposé). C'est la seule partie de l'aperçu intégré
+  qui ne peut **pas** être exercée via `npx tauri dev` sous WSL seul (voir
+  plus haut) : `StubClipboard` y tourne silencieusement à la place de
+  `WinClipboard`, donc un test sous WSL seul ne prouverait rien sur le
+  chemin réel — un lancement natif Windows est nécessaire (Vite peut rester
+  côté WSL, joignable depuis Windows via le port-forwarding).
+
+**Redimensionnement dynamique — résolution suit la taille de l'onglet.**
+Ajouté après le forward souris/clavier, sur demande explicite de
+l'utilisateur (« je peux redimensionner cette fenêtre, ça doit pouvoir
+s'adapter »). Deux moments distincts partagent le même mécanisme serveur :
+
+- **Taille initiale** : `ConnectRequest` transporte désormais `width`/
+  `height`, mesurés par `RdpTab.tsx` sur son conteneur (toujours mis en page
+  via flex, même avant que le canvas ne devienne visible — pas la peine
+  d'attendre la première frame) au moment de `connect_rdp_view`, plutôt
+  qu'une résolution fixe codée en dur. `build_config` les fait passer par
+  `MonitorLayoutEntry::adjust_display_size` (`ironrdp_displaycontrol::pdu`)
+  avant de les mettre dans `DesktopSize` : MS-RDPEDISP exige 200..=8192 et
+  une largeur paire.
+- **Redimensionnement en cours de session** : `RdpTab.tsx` observe son
+  conteneur via `ResizeObserver`, débounce à 400 ms (chaque redimensionnement
+  déclenche un aller-retour Display Control **et** une séquence de
+  réactivation complète côté serveur — pas un simple redraw local, donc pas
+  question d'en envoyer un par frame intermédiaire d'un drag de fenêtre) et
+  envoie `ClientMessage::Resize { width, height }`. Côté `rdp-sidecar`,
+  `active_stage.encode_resize(width, height, None, None)` (Display Control
+  Virtual Channel, déjà attaché sans condition dans `build_connector` depuis
+  la phase 1) encode la demande ; si le canal n'est pas disponible/pas encore
+  connecté (`encode_resize` renvoie `None`), la demande est simplement
+  ignorée — la session reste à la résolution courante plutôt que de tenter
+  le fallback plus lourd du client de référence (reconnexion complète avec
+  nouvelle taille, `RdpControlFlow::ReconnectWithNewSize` — non porté, coût
+  jugé disproportionné pour un cas déjà rare avec les serveurs modernes).
+- **Séquence de Désactivation-Réactivation** (MS-RDPBCGR §1.3.1.3) : la
+  réponse du serveur à un resize accepté (et plus généralement à tout
+  `ActiveStageOutput::DeactivateAll`, y compris ceux que le serveur
+  déclenche de son propre chef). Longtemps traité comme fatal
+  volontairement (« pas testable sans serveur réel ») — implémenté
+  maintenant que le test réel contre un vrai serveur (voir plus haut,
+  presse-papiers) a validé que l'architecture générale fonctionne.
+  `handle_deactivate_all` (nouveau, `main.rs`) rejoue le mini
+  échange capacités/finalisation en pilotant directement `reader`/`writer`
+  (`ironrdp_tokio::single_sequence_step_read`, même primitive que celle
+  utilisée par la connexion initiale) jusqu'à
+  `ConnectionActivationState::Finalized`, puis reconstruit `image`
+  (nouvelle résolution) et repointe `active_stage` dessus
+  (`set_fastpath_processor`/`set_share_id`/`set_enable_server_pointer`).
+  Porté depuis `ironrdp-client/src/rdp.rs`, mais adapté à l'API réellement
+  résolue plutôt que copié tel quel — encore une fois deux signatures
+  différentes de ce que la référence (une version plus récente) utilise :
+  `ActiveStageOutput::DeactivateAll` transporte directement un
+  `Box<ConnectionActivationSequence>` tout prêt (pas besoin d'un
+  `activation_factory.create()` séparé comme dans la référence), et
+  `ConnectionResult.connection_activation` (pas `activation_factory`) est le
+  nom du champ correspondant en amont — vérifié en lisant les sources
+  réelles de `ironrdp-connector` 0.9.0/`ironrdp-session` 0.10.0 avant
+  d'écrire le code, pas supposé par analogie avec la référence.
+- **Bug réel n°1 trouvé au premier test interactif** (2026-07-10,
+  redimensionnement contre un vrai serveur RDP via l'app native Windows) :
+  plantage immédiat au premier redimensionnement, `"traitement d'une trame :
+  [Fast-Path ...] custom error"`. Cause : `handle_deactivate_all`
+  reconstruisait le fast-path processor avec `bulk_decompressor: None`
+  **sans condition** — alors que `build_config` négocie
+  `compression_type: Some(CompressionType::K64)` et que la construction
+  INITIALE (`ActiveStage::new`, code interne à `ironrdp-session`, non
+  modifié) construit elle bien un décompresseur à partir de ce type négocié.
+  Une fois la séquence de réactivation terminée, le serveur continue
+  d'envoyer des mises à jour **compressées** (la compression se négocie une
+  fois au niveau transport, pas rejouée à chaque réactivation) — sans
+  décompresseur, la toute première mise à jour compressée échoue à se
+  décoder. Fix initial (2026-07-10) : reconstruire un `BulkCompressor` frais
+  à chaque réactivation via `build_bulk_decompressor` (nouveau, `main.rs`),
+  qui reproduisait `to_bulk_compression_type` — une fonction **privée** de
+  `ironrdp-session`, donc pas réutilisable telle quelle — en dépendance
+  directe sur `ironrdp-bulk`.
+- **Bug réel n°2 trouvé au retest** (2026-07-11, même scénario, une fois un
+  environnement de test Windows natif à nouveau disponible) : le fix n°1
+  arrêtait bien le plantage, mais l'affichage RDP restait **définitivement
+  noir** après un redimensionnement — sans plus aucune erreur ni fermeture
+  de session, donc rien à lire dans l'onglet. Diagnostiqué en lançant
+  `gui-termius.exe` directement (pas `Start-Process`, qui ne capture rien)
+  avec stdout/stderr redirigés vers un fichier, pour lire les logs `debug!`
+  d'`ironrdp-session` (activés via `RUST_LOG`, voir l'infrastructure
+  conservée plus bas) : les compteurs cumulés `total_compressed`/
+  `total_uncompressed` loggués à chaque trame **repartaient de zéro** juste
+  après chaque réactivation — un tout nouveau `BulkCompressor`, donc un
+  historique glissant MPPC vide, était construit à chaque fois. Or cet
+  historique doit rester continu avec celui du serveur, jamais réinitialisé
+  de son côté : une Deactivation-Reactivation Sequence renégocie les
+  capacités, elle ne relance pas la compression bulk au niveau transport. Un
+  décompresseur frais et désynchronisé produit un flux dont la **longueur
+  reste correcte** (elle dépend uniquement du bitstream compressé reçu, pas
+  du contenu de l'historique local) mais dont le contenu est faux, et
+  certaines trames finissent par échouer au décodage de structure en aval
+  (`BitmapData::decode`, `"not enough bytes"`) — exactement le symptôme du
+  bug n°1, simplement retardé de quelques trames au lieu d'immédiat, une
+  fois le décompresseur *absent* remplacé par un décompresseur *présent mais
+  désynchronisé*.
+- **Fix final** : `handle_deactivate_all` n'appelle plus du tout
+  `active_stage.set_fastpath_processor(...)` — le `fast_path::Processor`
+  existant (avec son `bulk_decompressor`/`complete_data`/`pointer_cache`/
+  `palette` intacts) reste en place tel quel à travers la réactivation ;
+  seuls `image` (nouvelle taille), `share_id` et `enable_server_pointer`
+  sont mis à jour via les setters dédiés d'`ActiveStage`
+  (`set_share_id`/`set_enable_server_pointer`, déjà existants pour un autre
+  usage). Contrepartie acceptée : le `share_id`/`io_channel_id`/
+  `user_channel_id` internes au processor (utilisés uniquement pour encoder
+  `FrameAcknowledgePdu`, un indice de pacing bande-passante, pas le rendu)
+  restent ceux de la connexion initiale — `fast_path::Processor` n'expose
+  aucun setter pour les corriger isolément, et c'était le seul compromis
+  possible sans forker `ironrdp-session`. `build_bulk_decompressor`, la
+  dépendance directe sur `ironrdp-bulk`, et le paramètre `compression_type`
+  de `handle_deactivate_all` ont tous été supprimés (plus nécessaires, la
+  fonction n'existe plus).
+- **Vérifié** : compilation + `clippy --all-targets -- -D warnings` propres
+  nativement sous Windows pour les deux bugs et leurs fixs (WSL indisponible
+  pour la seconde vérification — panne réseau DNS temporaire sur cette
+  machine ce jour-là, sans lien avec le code). **Le scénario complet
+  (connexion RDP réelle + plusieurs redimensionnements de la fenêtre
+  principale) a été validé pour de vrai par l'utilisateur le 2026-07-11**,
+  sans erreur ni écran noir.
+- **Infrastructure de diagnostic ajoutée en marge (conservée, pas
+  temporaire)** :
+  - `commands/rdp_view.rs` : la tâche qui relaie les événements du sidecar se
+    contentait auparavant d'ignorer silencieusement `CommandEvent::Error`/
+    `CommandEvent::Terminated` en cas de plantage réel (panique) du process
+    — invisible pour l'utilisateur en release (`windows_subsystem =
+    "windows"`, aucune console attachée). Elle capture maintenant les 4
+    derniers Ko de stderr et, sur une sortie anormale (code ≠ 0) ou une
+    erreur de pipe, émet un vrai `rdp-view-error` avec ce texte — visible
+    directement dans l'onglet plutôt qu'un « Session RDP terminée »
+    générique sans cause. Utile pour tout futur plantage du sidecar, pas
+    seulement celui-ci ; et le fait que ce chemin ne se soit PAS déclenché
+    pour le bug n°2 (le sidecar ne plantait pas, il continuait de tourner en
+    boucle sur des trames désynchronisées) a aidé à orienter le diagnostic
+    vers autre chose qu'un crash process.
+  - `rdp-sidecar` : `tracing-subscriber` a maintenant la feature
+    `env-filter`, et `main.rs` construit son subscriber via
+    `EnvFilter::try_from_default_env()` (repli sur `"info"` si absent —
+    même comportement qu'avant par défaut). Auparavant `fmt().init()`
+    ignorait totalement `RUST_LOG` (feature absente de
+    `tracing-subscriber`), rendant les `debug!`/`trace!` internes
+    d'`ironrdp-session` impossibles à activer sans recompiler le tout. Pour
+    un futur diagnostic similaire : ajouter
+    `.env("RUST_LOG", "ironrdp_session=debug")` (ou toute autre cible de
+    log) sur le `Command` du sidecar dans `connect_rdp_view`
+    (`commands/rdp_view.rs`) avant `.spawn()`, provisoirement.
+
+Limites connues restantes :
+- **Pas de curseur rendu.** Les événements `PointerDefault`/`PointerHidden`/
+  `PointerPosition`/`PointerBitmap` sont ignorés côté `rdp-sidecar`.
+- **Molette approximative.** Chaque événement `wheel` du navigateur envoie
+  un cran fixe (±120, la valeur RDP conventionnelle) dans le sens du signe
+  de `deltaY`, pas la magnitude réelle — évite un piège de troncature côté
+  encodage RDP (`MousePdu` tronque la rotation sur un octet signé ; relayer
+  un `deltaY` de navigateur brut sur un gros geste de scroll risquerait un
+  wraparound n'importe quoi).
+- **Pas de fallback reconnexion si le Display Control Virtual Channel est
+  indisponible.** Un redimensionnement demandé dans ce cas est simplement
+  ignoré (voir plus haut) plutôt que de reconnecter avec la nouvelle taille
+  — acceptable pour l'instant (rare avec des serveurs RDP modernes), mais à
+  garder en tête si un serveur plus ancien est testé un jour.
+
 ## Pièges déjà rencontrés (pour ne pas les redécouvrir)
 
 - **Drag-and-drop natif vs Tauri.** Sur Windows, le drag-and-drop OS-level de
@@ -368,23 +874,128 @@ est couvert par tests unitaires (`crypto.rs`, `master_vault.rs`).
   (« Unknown server key ») une fois le fail-closed introduit. Ne pas revenir à un
   `std::fs::write` direct pour ces fichiers.
 
+- **`$env:CARGO_TARGET_DIR` (comme le reste de `$env:PATH`/`Set-Location`) ne
+  survit pas d'un appel PowerShell à l'autre.** Chaque invocation de l'outil
+  PowerShell démarre un état frais — seul le répertoire de travail persiste,
+  pas les variables d'environnement ni le `$env:PATH` étendu. Oublier de
+  reposer `$env:CARGO_TARGET_DIR = "$env:USERPROFILE\..."` dans un appel
+  `cargo build` séparé du précédent fait retomber silencieusement sur le
+  target dir par défaut (relatif au `Cargo.toml`, donc sur le chemin UNC) et
+  reproduit exactement le piège du lock file incrémental documenté plus haut
+  (« Lock file de compilation incrémentale impossible à créer sur un chemin
+  UNC ») — rencontré deux fois de suite pendant la même session de debug RDP
+  avant d'y penser systématiquement à chaque nouvel appel `cargo`.
+
+- **Un process `rdp-sidecar.exe`/`gui-termius.exe` resté ouvert après un test
+  précédent verrouille le binaire que le build suivant essaie d'écrire.**
+  Symptôme trompeur : `cargo build` compile sans erreur (« Finished... »),
+  mais l'étape de copie automatique du sidecar dans le `build.rs` de
+  `tauri-build` panique avec `Os { code: 5, kind: PermissionDenied, message:
+  "Accès refusé." }` — rien à voir avec le code qui vient d'être modifié.
+  `Get-Process rdp-sidecar,gui-termius -ErrorAction SilentlyContinue | Stop-Process
+  -Force` avant de relancer le build ; particulièrement facile à oublier
+  quand on itère vite sur plusieurs correctifs RDP d'affilée (voir plus haut).
+
 ## Roadmap / prochaines features (décidées avec l'utilisateur)
 
 Features majeures retenues, dans l'ordre de priorité restant :
 
 1. **Coffre chiffré (mot de passe maître)** — ✅ **fait** (secrets, passphrases
    et clés privées chiffrés au repos ; voir la section « Stockage des secrets »).
-2. **Tunnel SOCKS dynamique (`-D`)** — à faire. Ajouter
-   `PortForwardKind::Dynamic` (`#[serde(default)]` pour la compat), un petit
-   serveur SOCKS5 local (handshake CONNECT sans auth, ~40 lignes, sans
-   dépendance) qui ouvre un `channel_open_direct_tcpip` par connexion dans
-   `core/src/port_forward.rs`. Réutilise `commands/forward.rs` ; UI dans
-   `TunnelsPanel.tsx` (masquer les champs « destination » pour ce type).
-3. **Génération + déploiement de clés SSH** — à faire. Keygen via
-   `russh::keys`/`ssh-key` (ed25519 par défaut, RSA en option, passphrase
-   optionnelle, stockée comme les clés importées). Commande `deploy_public_key`
-   = équivalent `ssh-copy-id` (crée `~/.ssh` en 700, ajoute la clé publique à
-   `authorized_keys` en 600, idempotent, via SFTP). UI dans `KeychainPanel.tsx`.
+2. **Tunnel SOCKS dynamique (`-D`)** — ✅ **fait**. `PortForwardKind::Dynamic`
+   dans `core/src/model.rs` ; serveur SOCKS5 local minimal (handshake sans
+   auth, `CONNECT` uniquement, IPv4/domaine/IPv6 — les noms de domaine sont
+   passés tels quels à `channel_open_direct_tcpip`, résolus côté serveur SSH)
+   dans `core/src/port_forward.rs` (`start_dynamic` / `handle_socks_connection`).
+   `commands/forward.rs` inchangé (générique sur `PortForwardKind`). UI dans
+   `TunnelsPanel.tsx` : option « SOCKS dynamique (-D) », champs « destination »
+   masqués pour ce type. Couvert par un test d'intégration réel (vrai `sshd`)
+   dans `core/tests/sftp_and_forward_integration.rs`
+   (`dynamic_port_forward_reaches_a_local_service`).
+3. **Génération + déploiement de clés SSH** — ✅ **fait**. `core/src/keygen.rs` :
+   `generate()` (ed25519 par défaut, RSA 4096 en option, passphrase optionnelle)
+   via `russh::keys`/`ssh_key::PrivateKey::random` — la source d'aléa OS passe
+   par `getrandom::SysRng` (nouvelle dépendance directe de `core/`), pas par
+   `ssh_key::rand_core::OsRng` : ce type a disparu de la version de `rand_core`
+   (0.10) que `ssh-key` résout réellement dans ce projet, malgré ce que
+   suggèrent encore les doctests de la crate (RC, features `getrandom` non
+   activée par `russh`). `public_key_line()` redérive la clé publique depuis le
+   PEM stocké (vault → workspace.json → fichier d'origine, même ordre que
+   `ssh::authenticate`) — pas de champ public persisté séparément.
+   `deploy_public_key()` = équivalent `ssh-copy-id` (crée `~/.ssh` en 700,
+   ajoute la clé publique à `authorized_keys` en 600 via SFTP, dédoublonnage
+   par matériel de clé — pas par commentaire). Logique de fusion pure
+   (`merge_authorized_keys`) extraite et testée unitairement plutôt qu'en
+   intégration réelle : contrairement aux autres tests SFTP qui opèrent dans
+   un sous-dossier jetable `gui-termius-test-{uuid}`, cette fonction cible le
+   `~/.ssh/authorized_keys` réel et sensible du compte qui fait tourner les
+   tests (le harnais `TestSshd` n'isole pas `$HOME`) — même logique que pour
+   le coffre chiffré, voir plus haut. Commandes Tauri dans
+   `commands/keys.rs` (nouveau fichier, pas `hosts.rs`) : `generate_private_key`,
+   `get_public_key`, `deploy_public_key`. UI dans `KeychainPanel.tsx` : bascule
+   Importer/Générer dans le formulaire existant, actions par clé « Copier la
+   clé publique » (presse-papiers direct, pas de zone de texte) et « Déployer
+   sur un hôte » (sélecteur d'hôte inline).
+4. **Accès multi-protocole (Docker exec / K8s exec / RDP)** — 🚧 **en cours**.
+   `HostKind` (`core/src/model.rs`, enum `Ssh` défaut / `DockerExec` / `K8sExec`
+   / `Rdp`) généralise `Host` sans réécrire son schéma : chaque kind repurpose
+   un sous-ensemble des champs existants au lieu d'en faire pousser de
+   nouveaux (voir le doc-comment de `HostKind` pour le détail exact par
+   kind — ex. `address` devient le socket/hôte Docker, ou un contexte
+   kubeconfig). **Docker exec est réel** : `core/src/docker.rs` (crate
+   `bollard`, connexion directe au démon — socket unix, named pipe Windows,
+   ou tcp/http — jamais via SSH, contrairement à l'hypothèse SSH-shaped
+   envisagée puis abandonnée en cours de route) expose `list_containers` et
+   `open_exec`, ce dernier bridgé sur le même type `ssh::ShellSession` que
+   les shells SSH pour être rejoué tel quel par `write_terminal`/
+   `resize_terminal`/`close_terminal` (`state::TerminalBackend` généralise
+   `TerminalSession` pour porter soit une `Connection` SSH soit rien de plus
+   pour Docker). `TerminalTab.tsx` accepte un `dockerContainerId` optionnel
+   qui bascule l'appel de connexion, sans dupliquer le composant. **RDP a
+   deux modes, tous deux réels.** Le mode « lanceur » historique
+   (`core/src/rdp.rs`, commande `connect_rdp`, action principale des hôtes
+   RDP) shell-out vers le client du système : sous Windows, `mstsc.exe` sur
+   un fichier `.rdp` temporaire, identifiants pré-chargés via `cmdkey`
+   (Gestionnaire d'identifiants Windows, cible `TERMSRV/<adresse>`) puis
+   supprimés — ainsi que le fichier `.rdp` — une fois `mstsc.exe` fermé
+   (tâche `tokio::spawn` qui attend la fin du process ; ne fonctionne que
+   parce que le runtime Tauri est long-lived — un test `#[tokio::test]`
+   classique tue cette tâche en fond avant qu'elle s'exécute, d'où le test
+   réel ci-dessous marqué `#[ignore]` plutôt que vérifié par un test
+   normal) ; sous Linux, `xfreerdp`/`xfreerdp3` si présent sur le `PATH`
+   (non testé en conditions réelles — absent de ce WSL) ; macOS non
+   supporté (pas de client scriptable). Le mode « aperçu intégré »
+   (`RdpTab.tsx`, action secondaire dans le menu de l'hôte) rend le flux RDP
+   directement dans l'appli, avec **forward souris/clavier, presse-papiers
+   bidirectionnel (Windows) et redimensionnement dynamique** (toujours pas
+   d'audio/lecteurs partagés/rendu de curseur), via un processus séparé
+   (`rdp-sidecar`, IronRDP) communiquant par un protocole maison sur
+   stdin/stdout (`rdp-ipc`) — voir la section « RDP intégré (rendu réel) :
+   architecture sidecar » plus haut pour le pourquoi (conflit de version
+   `ecdsa` insoluble entre `russh` et `ironrdp-connector`) et le comment.
+   **K8s exec reste une maquette UI sans backend** (sélecteur de type,
+   formulaire contexte+namespace, picker avec bandeau « aperçu »). Pas de
+   daemon Docker joignable dans ce WSL pour tester l'exec réellement
+   (intégration WSL non activée dans Docker Desktop) : couvert par tests
+   unitaires (classification d'hôte Docker) + relecture attentive de l'API
+   `bollard` vendue. Le lancement RDP (mode lanceur) a été vérifié pour de
+   vrai en natif Windows (`cargo test -p termius-core rdp:: -- --ignored`) :
+   vraie fenêtre `mstsc.exe` lancée contre une adresse TEST-NET-3 (RFC 5737,
+   non routable), identifiant confirmé présent dans `cmdkey /list` pendant
+   que `mstsc` tournait. Le mode « aperçu intégré », lui, **a été validé
+   contre un vrai serveur RDP par l'utilisateur le 2026-07-10**, en
+   plusieurs passes : connexion + affichage réels (un premier essai avait
+   crashé immédiatement sur `CryptoProvider` rustls non installé, voir plus
+   haut, corrigé puis reconfirmé), puis forward souris/clavier confirmé
+   fonctionnel, puis presse-papiers confirmé fonctionnel dans les deux sens
+   (nativement sous Windows, Vite resté côté WSL via le port-forwarding
+   WSL2). Le redimensionnement dynamique, ajouté juste après, a été retesté
+   contre ce même serveur le 2026-07-11 : un second bug y a été trouvé
+   (écran noir permanent après un resize, historique de décompression MPPC
+   désynchronisé par la reconstruction du fast-path processor à chaque
+   réactivation) et corrigé en ne reconstruisant plus ce processor du tout —
+   voir la section dédiée plus haut pour le détail complet des deux bugs et
+   du fix final ; limites restantes détaillées dans la même section.
 
 **Avant de proposer une feature « évidente » de client SSH, vérifier
 `src/components/` : elle existe probablement déjà.** L'app est déjà très complète
@@ -392,7 +1003,10 @@ Features majeures retenues, dans l'ordre de priorité restant :
 split panes (`SplitPane`), recherche terminal (`TerminalSearchBar`), reconnexion
 auto (pref `autoReconnect`), 8 thèmes de terminal, restauration d'onglets. Les
 vraies lacunes restantes sont côté protocole/ops : auth keyboard-interactive
-(MFA/OTP, absente de `AuthMethod`), les deux points ci-dessus.
+(MFA/OTP, absente de `AuthMethod`) et K8s exec (maquette UI sans backend) —
+l'aperçu RDP intégré (voir le point 4 ci-dessus) a désormais l'affichage, le
+forward souris/clavier, le presse-papiers et le redimensionnement dynamique,
+il ne lui manque plus que le rendu du curseur et le transfert de fichiers.
 
 ## Habitudes de collaboration sur ce projet
 

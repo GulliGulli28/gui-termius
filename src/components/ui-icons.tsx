@@ -90,6 +90,26 @@ export function IconMonitor({ size = 16, className }: P) {
   );
 }
 
+export function IconDocker({ size = 16, className }: P) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={className}>
+      <rect x="2" y="10" width="12" height="3" rx="0.5" stroke="currentColor" strokeWidth="1.25" />
+      <rect x="4" y="6.5" width="2.5" height="2.5" rx="0.4" stroke="currentColor" strokeWidth="1.15" />
+      <rect x="7" y="6.5" width="2.5" height="2.5" rx="0.4" stroke="currentColor" strokeWidth="1.15" />
+      <rect x="7" y="3.5" width="2.5" height="2.5" rx="0.4" stroke="currentColor" strokeWidth="1.15" />
+    </svg>
+  );
+}
+
+export function IconKubernetes({ size = 16, className }: P) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={className}>
+      <path d="M8 2l5 2.7v6.6L8 14l-5-2.7V4.7L8 2Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+      <circle cx="8" cy="8" r="1.4" stroke="currentColor" strokeWidth="1.1" />
+    </svg>
+  );
+}
+
 export function IconDotsVertical({ size = 16, className }: P) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" className={className}>
@@ -165,6 +185,15 @@ export function IconDownload({ size = 16, className }: P) {
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={className}>
       <path d="M8 3v7M5 7.5L8 10.5l3-3" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M3 11v2h10v-2" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconCopy({ size = 16, className }: P) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={className}>
+      <rect x="6" y="6" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.25" />
+      <path d="M10 6V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h2" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

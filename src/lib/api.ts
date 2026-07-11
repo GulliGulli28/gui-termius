@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AuthMethod, EnvVar, Entry, GroupId, HostId, ImportSelection, KeyId, KnownHostEntry, PaneListed, PaneOpened, PaneSource, PortForwardId, PortForwardKind, SnippetId, SshConfigHost, TransferProgressEvent, VaultStatus, Workspace } from "./types";
+import type { AuthMethod, DockerContainer, EnvVar, Entry, GroupId, HostId, HostKind, ImportSelection, KeyAlgorithm, KeyId, KnownHostEntry, PaneListed, PaneOpened, PaneSource, PortForwardId, PortForwardKind, RdpClientMessage, SnippetId, SshConfigHost, TransferProgressEvent, VaultStatus, Workspace } from "./types";
 
 export const api = {
   getWorkspace: () => invoke<Workspace>("get_workspace"),
@@ -8,10 +8,12 @@ export const api = {
   saveHost: (input: {
     id: HostId | null;
     label: string;
+    kind: HostKind;
     address: string;
     port: number;
     username: string;
     auth: AuthMethod;
+    dockerViaHostId: HostId | null;
     jumpVia: HostId[];
     groupId: GroupId | null;
     tags: string[];
@@ -40,6 +42,10 @@ export const api = {
   addPrivateKey: (name: string, path: string, passphrase: string | null) => invoke<Workspace>("add_private_key", { name, path, passphrase }),
   deletePrivateKey: (keyId: KeyId) => invoke<Workspace>("delete_private_key", { keyId }),
   renamePrivateKey: (keyId: KeyId, name: string) => invoke<Workspace>("rename_private_key", { keyId, name }),
+  generatePrivateKey: (name: string, algorithm: KeyAlgorithm, passphrase: string | null) =>
+    invoke<Workspace>("generate_private_key", { name, algorithm, passphrase }),
+  getPublicKey: (keyId: KeyId) => invoke<string>("get_public_key", { keyId }),
+  deployPublicKey: (hostId: HostId, keyId: KeyId) => invoke<void>("deploy_public_key", { hostId, keyId }),
   addCustomIcon: (name: string, dataUrl: string) => invoke<Workspace>("add_custom_icon", { name, dataUrl }),
   deleteCustomIcon: (iconId: string) => invoke<Workspace>("delete_custom_icon", { iconId }),
   readIconFile: (path: string) => invoke<string>("read_icon_file", { path }),
@@ -67,6 +73,12 @@ export const api = {
   importSshConfigHosts: (selections: ImportSelection[]) => invoke<Workspace>("import_ssh_config_hosts", { selections }),
 
   connectTerminal: (hostId: HostId) => invoke<string>("connect_terminal", { hostId }),
+  listDockerContainers: (hostId: HostId) => invoke<DockerContainer[]>("list_docker_containers", { hostId }),
+  connectDockerExec: (hostId: HostId, containerId: string) => invoke<string>("connect_docker_exec", { hostId, containerId }),
+  connectRdp: (hostId: HostId) => invoke<void>("connect_rdp", { hostId }),
+  connectRdpView: (hostId: HostId, width: number, height: number) => invoke<string>("connect_rdp_view", { hostId, width, height }),
+  sendRdpViewInput: (sessionId: string, message: RdpClientMessage) => invoke<void>("send_rdp_view_input", { sessionId, message }),
+  closeRdpView: (sessionId: string) => invoke<void>("close_rdp_view", { sessionId }),
   writeTerminal: (sessionId: string, data: string) => invoke<void>("write_terminal", { sessionId, data }),
   resizeTerminal: (sessionId: string, cols: number, rows: number) => invoke<void>("resize_terminal", { sessionId, cols, rows }),
   closeTerminal: (sessionId: string) => invoke<void>("close_terminal", { sessionId }),
@@ -115,6 +127,20 @@ export function onTerminalData(handler: (id: string, data: string) => void): Pro
 
 export function onTerminalClosed(handler: (id: string) => void): Promise<UnlistenFn> {
   return listen<{ id: string }>("terminal-closed", (event) => handler(event.payload.id));
+}
+
+export function onRdpViewFrame(handler: (id: string, width: number, height: number, pixels: string) => void): Promise<UnlistenFn> {
+  return listen<{ id: string; width: number; height: number; pixels: string }>("rdp-view-frame", (event) =>
+    handler(event.payload.id, event.payload.width, event.payload.height, event.payload.pixels),
+  );
+}
+
+export function onRdpViewError(handler: (id: string, message: string) => void): Promise<UnlistenFn> {
+  return listen<{ id: string; message: string }>("rdp-view-error", (event) => handler(event.payload.id, event.payload.message));
+}
+
+export function onRdpViewClosed(handler: (id: string) => void): Promise<UnlistenFn> {
+  return listen<{ id: string }>("rdp-view-closed", (event) => handler(event.payload.id));
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {

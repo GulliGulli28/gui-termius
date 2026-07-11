@@ -1,21 +1,39 @@
 use termius_core::sync_ext::MutexExt;
-use crate::state::{AppState, TerminalSession};
+use crate::state::{AppState, TerminalBackend, TerminalSession};
 use crate::util;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use termius_core::model::HostId;
 use termius_core::ssh::{self, ShellInput};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 #[derive(Serialize, Clone)]
-struct TerminalDataEvent {
+pub(crate) struct TerminalDataEvent {
     id: String,
     data: String,
 }
 
 #[derive(Serialize, Clone)]
-struct TerminalClosedEvent {
+pub(crate) struct TerminalClosedEvent {
     id: String,
+}
+
+/// Forwards a session's raw output channel to the frontend as `terminal-data`
+/// events (base64-encoded) until it closes, then emits `terminal-closed` —
+/// shared by every session backend (SSH shell, Docker exec, ...) so each one
+/// only needs to produce a plain `mpsc::Receiver<Vec<u8>>`, not know about
+/// Tauri events itself.
+pub(crate) fn spawn_output_bridge(app: AppHandle, session_id: String, mut output: mpsc::Receiver<Vec<u8>>) {
+    tokio::spawn(async move {
+        while let Some(bytes) = output.recv().await {
+            let payload = TerminalDataEvent { id: session_id.clone(), data: util::encode(&bytes) };
+            if app.emit("terminal-data", payload).is_err() {
+                break;
+            }
+        }
+        let _ = app.emit("terminal-closed", TerminalClosedEvent { id: session_id });
+    });
 }
 
 /// Wraps a value in single quotes, escaping any embedded single quotes.
@@ -63,25 +81,18 @@ pub async fn connect_terminal(app: AppHandle, state: State<'_, AppState>, host_i
     let shell = ssh::open_shell(&connection, 80, 24, agent_forward).await.map_err(|e| e.to_string())?;
 
     let session_id = Uuid::new_v4().to_string();
-    let ssh::ShellSession { input, mut output } = shell;
+    let ssh::ShellSession { input, output } = shell;
 
-    let emit_id = session_id.clone();
-    let app_handle = app.clone();
-    tokio::spawn(async move {
-        while let Some(bytes) = output.recv().await {
-            let payload = TerminalDataEvent { id: emit_id.clone(), data: util::encode(&bytes) };
-            if app_handle.emit("terminal-data", payload).is_err() {
-                break;
-            }
-        }
-        let _ = app_handle.emit("terminal-closed", TerminalClosedEvent { id: emit_id });
-    });
+    spawn_output_bridge(app.clone(), session_id.clone(), output);
 
     for cmd in startup_cmds {
         let _ = input.send(ShellInput::Data(cmd)).await;
     }
 
-    state.terminals.lock_recover().insert(session_id.clone(), TerminalSession { connection, input });
+    state.terminals.lock_recover().insert(
+        session_id.clone(),
+        TerminalSession { backend: TerminalBackend::Ssh(connection), input },
+    );
     Ok(session_id)
 }
 

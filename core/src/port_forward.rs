@@ -57,6 +57,7 @@ pub async fn start(
     match forward.kind {
         PortForwardKind::Local => start_local(connection, forward).await,
         PortForwardKind::Remote => start_remote(&connection, forward).await,
+        PortForwardKind::Dynamic => start_dynamic(connection, forward).await,
     }
 }
 
@@ -109,6 +110,121 @@ async fn start_local(
         config: forward,
         kind: ActiveKind::Local(accept_loop),
     })
+}
+
+/// A local SOCKS5 proxy (`ssh -D`): each accepted connection picks its own
+/// destination via the SOCKS handshake, unlike `start_local` where the
+/// destination is fixed for the whole listener. Reuses `ActiveKind::Local`
+/// since stopping it means the same thing: abort the accept loop.
+async fn start_dynamic(
+    connection: Arc<Connection>,
+    forward: PortForward,
+) -> anyhow::Result<ActiveForward> {
+    let listener = TcpListener::bind((forward.bind_address.as_str(), forward.bind_port))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "could not listen on {}:{}: {e}",
+                forward.bind_address,
+                forward.bind_port
+            )
+        })?;
+
+    let accept_loop = tokio::spawn(async move {
+        loop {
+            let Ok((stream, peer)) = listener.accept().await else {
+                break;
+            };
+            let connection = connection.clone();
+            tokio::spawn(async move {
+                let _ = handle_socks_connection(&connection, stream, peer).await;
+            });
+        }
+    });
+
+    Ok(ActiveForward {
+        config: forward,
+        kind: ActiveKind::Local(accept_loop),
+    })
+}
+
+/// Minimal SOCKS5 server (RFC 1928): no authentication, `CONNECT` only.
+/// Domain-name destinations are passed through as-is to
+/// `channel_open_direct_tcpip`, which lets the *remote* sshd resolve them —
+/// exactly the point of `-D`, no local DNS involved.
+async fn handle_socks_connection(
+    connection: &Connection,
+    mut stream: tokio::net::TcpStream,
+    peer: std::net::SocketAddr,
+) -> anyhow::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut greeting = [0u8; 2];
+    stream.read_exact(&mut greeting).await?;
+    anyhow::ensure!(greeting[0] == 0x05, "unsupported SOCKS version {}", greeting[0]);
+    let mut methods = vec![0u8; greeting[1] as usize];
+    stream.read_exact(&mut methods).await?;
+    stream.write_all(&[0x05, 0x00]).await?; // no authentication required
+
+    let mut request = [0u8; 4];
+    stream.read_exact(&mut request).await?;
+    let dest_address = match request[3] {
+        0x01 => {
+            let mut buf = [0u8; 4];
+            stream.read_exact(&mut buf).await?;
+            std::net::Ipv4Addr::from(buf).to_string()
+        }
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len).await?;
+            let mut buf = vec![0u8; len[0] as usize];
+            stream.read_exact(&mut buf).await?;
+            String::from_utf8(buf)?
+        }
+        0x04 => {
+            let mut buf = [0u8; 16];
+            stream.read_exact(&mut buf).await?;
+            std::net::Ipv6Addr::from(buf).to_string()
+        }
+        atyp => anyhow::bail!("unsupported SOCKS address type {atyp}"),
+    };
+    let mut port_buf = [0u8; 2];
+    stream.read_exact(&mut port_buf).await?;
+    let dest_port = u16::from_be_bytes(port_buf);
+
+    if request[1] != 0x01 {
+        stream.write_all(&socks_reply(0x07)).await?;
+        anyhow::bail!("unsupported SOCKS command {}", request[1]);
+    }
+
+    let channel = match connection
+        .target()
+        .channel_open_direct_tcpip(
+            dest_address,
+            dest_port as u32,
+            peer.ip().to_string(),
+            peer.port() as u32,
+        )
+        .await
+    {
+        Ok(channel) => channel,
+        Err(e) => {
+            stream.write_all(&socks_reply(0x05)).await?;
+            anyhow::bail!("SOCKS destination unreachable: {e}");
+        }
+    };
+    stream.write_all(&socks_reply(0x00)).await?;
+
+    let mut remote = channel.into_stream();
+    tokio::io::copy_bidirectional(&mut stream, &mut remote).await?;
+    Ok(())
+}
+
+/// A `CONNECT` reply with `BND.ADDR`/`BND.PORT` left as `0.0.0.0:0` — every
+/// SOCKS5 client tested against this server only cares about `REP` for that
+/// command, not the bound address.
+fn socks_reply(rep: u8) -> [u8; 10] {
+    [0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
 }
 
 async fn start_remote(

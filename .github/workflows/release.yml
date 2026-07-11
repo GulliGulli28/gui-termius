@@ -47,6 +47,28 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # rdp-sidecar is its own separate Cargo workspace (see rdp-sidecar/Cargo.toml
+      # and CLAUDE.md's "RDP intégré : architecture sidecar" section) — the root
+      # `cargo build --workspace` never touches it, and tauri-action's `tauri build`
+      # doesn't know how to build it either. It has to be built and placed at
+      # `src-tauri/binaries/rdp-sidecar-<host-triple>[.exe]` ourselves, before
+      # tauri-action runs, or the build fails outright: tauri-build's build.rs
+      # checks `bundle.externalBin` paths exist even to just compile the main crate.
+      - name: Build rdp-sidecar and stage it for bundling (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          cd rdp-sidecar && cargo build --release
+          mkdir -p ../src-tauri/binaries
+          cp target/release/rdp-sidecar.exe ../src-tauri/binaries/rdp-sidecar-x86_64-pc-windows-msvc.exe
+
+      - name: Build rdp-sidecar and stage it for bundling (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          cd rdp-sidecar && cargo build --release
+          mkdir -p ../src-tauri/binaries
+          cp target/release/rdp-sidecar ../src-tauri/binaries/rdp-sidecar-x86_64-unknown-linux-gnu
+
       - name: Build and publish
         uses: tauri-apps/tauri-action@v0
         env:

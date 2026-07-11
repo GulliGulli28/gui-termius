@@ -1,19 +1,31 @@
 import { useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
-import type { Group, GroupId, Host, HostId, Workspace } from "../lib/types";
+import type { DockerContainer, Group, GroupId, Host, HostId, Workspace } from "../lib/types";
 import { HostIcon } from "./icons";
+import { hostKindMeta } from "../lib/hostKinds";
+import { ConnectionPickerModal } from "./ConnectionPickerModal";
 import {
   IconHosts, IconSearch, IconPlus, IconKeyboard, IconFlash,
   IconFolder, IconChevronDown, IconChevronRight,
   IconDotsVertical, IconEdit,
-  IconUpload, IconDownload,
+  IconUpload, IconDownload, IconMonitor,
 } from "./ui-icons";
+
+// Example-only pods for the Kubernetes picker — k8sExec has no backend yet,
+// see HostKind's doc comment in lib/types.ts.
+const K8S_MOCK_PODS = [
+  { id: "api-7d9f8b6c-x2kq9", name: "api-7d9f8b6c-x2kq9", meta: "default", up: true },
+  { id: "worker-5c7d8f9b-p4m2n", name: "worker-5c7d8f9b-p4m2n", meta: "default", up: true },
+  { id: "migration-job-8f2a1", name: "migration-job-8f2a1", meta: "batch · Completed", up: false },
+];
 
 interface HostsPanelProps {
   workspace: Workspace;
   activeHostId?: HostId | null;
   onConnect: (host: Host) => void;
+  onConnectDocker: (host: Host, containerId: string) => void;
+  onConnectRdpView: (host: Host) => void;
   onOpenLocalTerminal: (shell?: string) => void;
   onNewHost: () => void;
   onEditHost: (host: Host) => void;
@@ -88,7 +100,7 @@ function LocalTerminalButton({ onOpen }: { onOpen: (shell?: string) => void }) {
 }
 
 export function HostsPanel({
-  workspace, activeHostId, onConnect, onOpenLocalTerminal,
+  workspace, activeHostId, onConnect, onConnectDocker, onConnectRdpView, onOpenLocalTerminal,
   onNewHost, onEditHost, onNewGroup, onNewHostInGroup, onNewGroupUnder,
   onEditGroup, onQuickSSH, onWorkspaceUpdate, onError,
 }: HostsPanelProps) {
@@ -97,13 +109,19 @@ export function HostsPanel({
   const [openMenuHostId, setOpenMenuHostId] = useState<HostId | null>(null);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [hostStatus, setHostStatus] = useState<Record<string, boolean>>({});
+  const [containerCounts, setContainerCounts] = useState<Record<string, number | null>>({});
   const [exportPendingHost, setExportPendingHost] = useState<Host | null>(null);
+  const [dockerPickerHost, setDockerPickerHost] = useState<Host | null>(null);
+  const [dockerContainers, setDockerContainers] = useState<DockerContainer[] | null>(null);
+  const [dockerPickerError, setDockerPickerError] = useState<string | null>(null);
+  const [k8sPickerHost, setK8sPickerHost] = useState<Host | null>(null);
 
   const hostIdsKey = workspace.hosts.map((h) => h.id).join(",");
   useEffect(() => {
     let cancelled = false;
     const poll = () => {
       for (const host of workspace.hosts) {
+        if ((host.kind ?? "ssh") !== "ssh") continue;
         api.checkHostStatus(host.id)
           .then((online) => { if (!cancelled) setHostStatus((prev) => ({ ...prev, [host.id]: online })); })
           .catch(() => { if (!cancelled) setHostStatus((prev) => ({ ...prev, [host.id]: false })); });
@@ -114,6 +132,45 @@ export function HostsPanel({
     return () => { cancelled = true; clearInterval(interval); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostIdsKey]);
+
+  // Live "N actifs" count shown right in the list for Docker hosts, so the
+  // daemon's state is visible before ever opening the container picker.
+  useEffect(() => {
+    let cancelled = false;
+    const dockerHosts = workspace.hosts.filter((h) => h.kind === "dockerExec");
+    const poll = () => {
+      for (const host of dockerHosts) {
+        api.listDockerContainers(host.id)
+          .then((containers) => {
+            if (cancelled) return;
+            const running = containers.filter((c) => c.state === "running").length;
+            setContainerCounts((prev) => ({ ...prev, [host.id]: running }));
+          })
+          .catch(() => { if (!cancelled) setContainerCounts((prev) => ({ ...prev, [host.id]: null })); });
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 30000);
+    return () => { cancelled = true; clearInterval(interval); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostIdsKey]);
+
+  const openDockerPicker = (host: Host) => {
+    setDockerPickerHost(host);
+    setDockerContainers(null);
+    setDockerPickerError(null);
+    api.listDockerContainers(host.id)
+      .then(setDockerContainers)
+      .catch((e) => setDockerPickerError(String(e)));
+  };
+
+  const handleConnect = (host: Host) => {
+    const kind = host.kind ?? "ssh";
+    if (kind === "ssh") { onConnect(host); return; }
+    if (kind === "dockerExec") { openDockerPicker(host); return; }
+    if (kind === "k8sExec") { setK8sPickerHost(host); return; }
+    api.connectRdp(host.id).catch((e) => onError?.(String(e)));
+  };
 
   const quickSSH = parseSSHInput(search);
 
@@ -186,6 +243,14 @@ export function HostsPanel({
   const renderHost = (host: Host, depth: number) => {
     const menuOpen = openMenuHostId === host.id;
     const isActive = host.id === activeHostId;
+    const kind = host.kind ?? "ssh";
+    const { label: kindLabel, Icon: KindIcon } = hostKindMeta(kind);
+    const subtitle =
+      kind === "dockerExec" ? host.address :
+      kind === "k8sExec" ? `Contexte : ${host.address}` :
+      kind === "rdp" ? `${host.username}@${host.address}${host.port !== 3389 ? `:${host.port}` : ""}` :
+      `${host.username}@${host.address}${host.port !== 22 ? `:${host.port}` : ""}`;
+    const runningCount = kind === "dockerExec" ? containerCounts[host.id] : undefined;
     return (
       <div
         key={host.id}
@@ -202,15 +267,23 @@ export function HostsPanel({
         <div className="flex items-stretch">
           {/* Connect zone */}
           <button
-            onClick={() => onConnect(host)}
+            onClick={() => handleConnect(host)}
             className="flex min-w-0 flex-1 items-center gap-2.5 p-3 text-left"
-            title={`Connecter — ${host.username}@${host.address}:${host.port}`}
+            title={kind === "ssh" ? `Connecter — ${subtitle}` : kindLabel}
           >
             <div className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[var(--c-accent-dim)]">
               {host.icon
                 ? <HostIcon iconId={host.icon} customIcons={workspace.customIcons} size={24} />
                 : <IconHosts size={18} className="text-[var(--c-accent-text)]" />
               }
+              {kind !== "ssh" && (
+                <span
+                  title={kindLabel}
+                  className="absolute -left-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border-2 border-[var(--c-bg3)] bg-[var(--c-bg2)] text-[var(--c-text-secondary)]"
+                >
+                  <KindIcon size={9} />
+                </span>
+              )}
               {hostStatus[host.id] !== undefined && (
                 <span
                   title={hostStatus[host.id] ? "En ligne" : "Hors ligne"}
@@ -221,10 +294,15 @@ export function HostsPanel({
               )}
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[14px] font-medium text-[var(--c-text)]">{host.label}</div>
-              <div className="truncate font-mono text-[11px] text-[var(--c-text-muted)]">
-                {host.username}@{host.address}{host.port !== 22 ? `:${host.port}` : ""}
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-[14px] font-medium text-[var(--c-text)]">{host.label}</span>
+                {runningCount != null && (
+                  <span className="shrink-0 rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[9.5px] font-semibold text-sky-300">
+                    {runningCount} actif{runningCount === 1 ? "" : "s"}
+                  </span>
+                )}
               </div>
+              <div className="truncate font-mono text-[11px] text-[var(--c-text-muted)]">{subtitle}</div>
             </div>
           </button>
           {/* Menu toggle */}
@@ -267,6 +345,15 @@ export function HostsPanel({
             >
               <IconUpload size={12} /> Exporter
             </button>
+            {kind === "rdp" && (
+              <button
+                onClick={() => { onConnectRdpView(host); setOpenMenuHostId(null); }}
+                title="Aperçu intégré, lecture seule pour l'instant — le clic principal reste le client système, pleinement interactif"
+                className="flex flex-1 basis-[80px] items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-[var(--c-text-secondary)] hover:bg-white/5"
+              >
+                <IconMonitor size={12} /> Aperçu intégré
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -437,6 +524,33 @@ export function HostsPanel({
             </div>
           </div>
         </>
+      )}
+
+      {dockerPickerHost && (
+        <ConnectionPickerModal
+          title={`Conteneurs Docker — ${dockerPickerHost.label}`}
+          loading={dockerContainers === null && !dockerPickerError}
+          error={dockerPickerError}
+          items={(dockerContainers ?? []).map((c) => ({
+            id: c.id,
+            name: c.name || c.id.slice(0, 12),
+            meta: `${c.image} · ${c.status}`,
+            up: c.state === "running",
+          }))}
+          onPick={(containerId) => { onConnectDocker(dockerPickerHost, containerId); setDockerPickerHost(null); }}
+          onClose={() => setDockerPickerHost(null)}
+        />
+      )}
+
+      {k8sPickerHost && (
+        <ConnectionPickerModal
+          title={`Pods Kubernetes — ${k8sPickerHost.label}`}
+          warning="Aperçu avec des données d'exemple — le backend Kubernetes n'est pas encore implémenté."
+          loading={false}
+          items={K8S_MOCK_PODS}
+          onPick={() => { setK8sPickerHost(null); onError?.("Aperçu uniquement — l'exécution Kubernetes n'est pas encore implémentée."); }}
+          onClose={() => setK8sPickerHost(null)}
+        />
       )}
     </div>
   );

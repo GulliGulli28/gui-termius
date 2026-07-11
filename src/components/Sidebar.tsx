@@ -1,4 +1,4 @@
-import type { Group, GroupId, Host, HostId, KeyId, PortForwardId, SnippetId, VaultStatus, Workspace } from "../lib/types";
+import type { Group, GroupId, Host, HostId, KeyAlgorithm, KeyId, PortForwardId, PortForwardKind, SnippetId, VaultStatus, Workspace } from "../lib/types";
 import type { AppPreferences } from "../lib/preferences";
 import type { ComponentType } from "react";
 import { HostsPanel } from "./HostsPanel";
@@ -18,6 +18,8 @@ interface SidebarProps {
   onPanelChange: (panel: SidebarPanelKind) => void;
   activeHostId?: HostId | null;
   onConnect: (host: Host) => void;
+  onConnectDocker: (host: Host, containerId: string) => void;
+  onConnectRdpView: (host: Host) => void;
   onOpenTransfer: (host: Host) => void;
   onOpenLocalTerminal: (shell?: string) => void;
   onQuickSSH: (cmd: string) => void;
@@ -32,9 +34,10 @@ interface SidebarProps {
   onDeleteSnippet: (id: SnippetId) => void;
   onRunSnippet: (command: string, targetTabIds?: string[]) => void;
   openTerminals: { id: string; label: string }[];
-  onAddForward: (input: { hostId: HostId; kind: "local" | "remote"; bindAddress: string; bindPort: number; destAddress: string; destPort: number }) => void;
+  onAddForward: (input: { hostId: HostId; kind: PortForwardKind; bindAddress: string; bindPort: number; destAddress: string; destPort: number }) => void;
   onDeleteForward: (id: PortForwardId) => void;
   onAddKey: (name: string, path: string, passphrase: string | null) => void;
+  onGenerateKey: (name: string, algorithm: KeyAlgorithm, passphrase: string | null) => void;
   onDeleteKey: (id: KeyId) => void;
   onRenameKey: (id: KeyId, name: string) => void;
   onWorkspaceUpdate: (ws: Workspace) => void;
@@ -104,6 +107,8 @@ export function Sidebar(props: SidebarProps) {
               workspace={workspace}
               activeHostId={props.activeHostId}
               onConnect={props.onConnect}
+              onConnectDocker={props.onConnectDocker}
+              onConnectRdpView={props.onConnectRdpView}
               onOpenLocalTerminal={props.onOpenLocalTerminal}
               onQuickSSH={props.onQuickSSH}
               onNewHost={props.onNewHost}
@@ -141,6 +146,7 @@ export function Sidebar(props: SidebarProps) {
             <KeychainPanel
               workspace={workspace}
               onAddKey={props.onAddKey}
+              onGenerateKey={props.onGenerateKey}
               onDeleteKey={props.onDeleteKey}
               onRenameKey={props.onRenameKey}
             />

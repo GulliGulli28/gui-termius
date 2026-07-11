@@ -1,0 +1,65 @@
+interface PickerItem {
+  id: string;
+  name: string;
+  meta: string;
+  up: boolean;
+}
+
+interface ConnectionPickerModalProps {
+  title: string;
+  /** Shown as an amber notice under the title — e.g. to flag example data. */
+  warning?: string;
+  loading: boolean;
+  error?: string | null;
+  items: PickerItem[];
+  onPick: (id: string) => void;
+  onClose: () => void;
+}
+
+/** Shared "pick a live target" modal for kinds where a saved host is really a
+ * daemon/cluster entry point (Docker containers, Kubernetes pods) rather
+ * than a single connectable thing — same chrome for a real, loading list
+ * and a stubbed, example one. */
+export function ConnectionPickerModal({ title, warning, loading, error, items, onPick, onClose }: ConnectionPickerModalProps) {
+  return (
+    <>
+      <div className="fixed inset-0 z-30 bg-black/50" onClick={onClose} />
+      <div className="fixed left-1/2 top-1/2 z-40 w-[360px] max-w-[90vw] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-lg bg-[var(--c-bg2)] shadow-[var(--shadow-lg)]">
+        <div className="border-b border-[var(--c-border)] px-4 py-3">
+          <p className="text-[14px] font-medium text-[var(--c-text)]">{title}</p>
+          {warning && <p className="mt-1 text-[11px] leading-relaxed text-amber-300">⚠ {warning}</p>}
+        </div>
+        <div className="max-h-[320px] overflow-y-auto p-1.5">
+          {loading && (
+            <div className="flex items-center gap-2 px-3 py-6 text-[12.5px] text-[var(--c-text-muted)]">
+              <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-[var(--c-border)] border-t-[var(--c-accent)]" />
+              Interrogation en cours…
+            </div>
+          )}
+          {!loading && error && <p className="px-3 py-4 text-[12.5px] text-rose-300">{error}</p>}
+          {!loading && !error && items.length === 0 && (
+            <p className="px-3 py-4 text-[12.5px] text-[var(--c-text-muted)]">Aucun élément trouvé.</p>
+          )}
+          {!loading && !error && items.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => onPick(item.id)}
+              className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left hover:bg-white/5"
+            >
+              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${item.up ? "bg-emerald-400" : "bg-[var(--c-text-faint)]"}`} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[12.5px] text-[var(--c-text)]">{item.name}</span>
+                <span className="block truncate text-[10.5px] text-[var(--c-text-muted)]">{item.meta}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className="border-t border-[var(--c-border)] p-2">
+          <button onClick={onClose} className="w-full rounded-md bg-[var(--c-bg3)] py-1.5 text-center text-[12px] text-[var(--c-text-secondary)] hover:bg-white/5">
+            Fermer
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}

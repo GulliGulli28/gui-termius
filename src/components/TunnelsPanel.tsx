@@ -40,14 +40,16 @@ export function TunnelsPanel({ workspace, onAddForward, onDeleteForward, onError
     }
   };
 
+  const isDynamic = kind === "dynamic";
+
   const submit = () => {
     const bp = Number(bindPort);
-    const dp = Number(destPort);
-    if (!hostId || !bindAddress.trim() || !destAddress.trim() || !Number.isInteger(bp) || !Number.isInteger(dp)) {
+    const dp = isDynamic ? 0 : Number(destPort);
+    if (!hostId || !bindAddress.trim() || !Number.isInteger(bp) || (!isDynamic && (!destAddress.trim() || !Number.isInteger(dp)))) {
       onError("Champs de tunnel invalides");
       return;
     }
-    onAddForward({ hostId, kind, bindAddress: bindAddress.trim(), bindPort: bp, destAddress: destAddress.trim(), destPort: dp });
+    onAddForward({ hostId, kind, bindAddress: bindAddress.trim(), bindPort: bp, destAddress: isDynamic ? "" : destAddress.trim(), destPort: dp });
     setBindPort("");
     setDestPort("");
     setShowForm(false);
@@ -76,15 +78,22 @@ export function TunnelsPanel({ workspace, onAddForward, onDeleteForward, onError
               <select value={kind} onChange={(e) => setKind(e.target.value as PortForwardKind)} className={selectClass}>
                 <option value="local">Local (-L)</option>
                 <option value="remote">Distant (-R)</option>
+                <option value="dynamic">SOCKS dynamique (-D)</option>
               </select>
               <div className="flex gap-1.5">
                 <input value={bindAddress} onChange={(e) => setBindAddress(e.target.value)} placeholder="Locale" className={`${inputClass} min-w-0 flex-1 font-mono`} />
                 <input value={bindPort} onChange={(e) => setBindPort(e.target.value)} placeholder="Port" inputMode="numeric" className={`${inputClass} w-16 shrink-0 font-mono`} />
               </div>
-              <div className="flex gap-1.5">
-                <input value={destAddress} onChange={(e) => setDestAddress(e.target.value)} placeholder="Distante" className={`${inputClass} min-w-0 flex-1 font-mono`} />
-                <input value={destPort} onChange={(e) => setDestPort(e.target.value)} placeholder="Port" inputMode="numeric" className={`${inputClass} w-16 shrink-0 font-mono`} />
-              </div>
+              {isDynamic ? (
+                <p className="px-0.5 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
+                  Proxy SOCKS5 : la destination est choisie par chaque application qui s'y connecte, pas de « distante » fixe.
+                </p>
+              ) : (
+                <div className="flex gap-1.5">
+                  <input value={destAddress} onChange={(e) => setDestAddress(e.target.value)} placeholder="Distante" className={`${inputClass} min-w-0 flex-1 font-mono`} />
+                  <input value={destPort} onChange={(e) => setDestPort(e.target.value)} placeholder="Port" inputMode="numeric" className={`${inputClass} w-16 shrink-0 font-mono`} />
+                </div>
+              )}
               <div className="flex gap-1.5">
                 <button onClick={submit} className="accent-surface flex-1 rounded-md border py-1.5 text-xs font-medium">
                   Ajouter
@@ -106,10 +115,14 @@ export function TunnelsPanel({ workspace, onAddForward, onDeleteForward, onError
           return (
             <div key={forward.id} className="rounded-xl border border-transparent bg-[var(--c-bg3)] p-2.5 transition-all hover:border-white/15">
               <p className="text-xs font-medium text-[var(--c-text-secondary)]">
-                {forward.kind === "local" ? "Local" : "Distant"}{" "}
+                {forward.kind === "local" ? "Local" : forward.kind === "remote" ? "Distant" : "SOCKS"}{" "}
                 <span className="font-mono text-[var(--c-text)]">{forward.bindAddress}:{forward.bindPort}</span>
-                {" → "}
-                <span className="font-mono text-[var(--c-text)]">{forward.destAddress}:{forward.destPort}</span>
+                {forward.kind !== "dynamic" && (
+                  <>
+                    {" → "}
+                    <span className="font-mono text-[var(--c-text)]">{forward.destAddress}:{forward.destPort}</span>
+                  </>
+                )}
               </p>
               <p className="mt-0.5 text-[10px] text-[var(--c-text-muted)]">{hostLabel}</p>
               <div className="mt-2 flex flex-wrap gap-1">
@@ -140,5 +153,9 @@ export function TunnelsPanel({ workspace, onAddForward, onDeleteForward, onError
   );
 }
 
-const inputClass = "w-full rounded-md bg-[var(--c-bg2)] px-2 py-1.5 text-[13px] text-[var(--c-text)] placeholder:text-[var(--c-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--c-accent)]";
+// No `w-full` here: every call site pairs this with its own `flex-1`/`w-16`
+// sizing in a flex row, and a baked-in `w-full` fights those utilities
+// (both are "width", so whichever Tailwind emits last in the stylesheet
+// wins — unrelated to source order in the className string).
+const inputClass = "rounded-md bg-[var(--c-bg2)] px-2 py-1.5 text-[13px] text-[var(--c-text)] placeholder:text-[var(--c-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--c-accent)]";
 const selectClass = "w-full rounded-md bg-[var(--c-bg2)] px-2 py-1.5 text-[13px] text-[var(--c-text)] focus:outline-none focus:ring-1 focus:ring-[var(--c-accent)]";

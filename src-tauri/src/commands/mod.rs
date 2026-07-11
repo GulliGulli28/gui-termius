@@ -1,9 +1,13 @@
 pub mod command_history;
 pub mod dialog;
+pub mod docker;
 pub mod export;
 pub mod forward;
 pub mod hosts;
+pub mod keys;
 pub mod known_hosts;
+pub mod rdp;
+pub mod rdp_view;
 pub mod sftp;
 pub mod terminal;
 pub mod vault;

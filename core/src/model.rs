@@ -67,15 +67,48 @@ where
     })
 }
 
+/// What kind of target `Host` describes. `Ssh` uses every field with its
+/// literal meaning; the other kinds repurpose a subset of the same fields
+/// rather than growing dedicated ones, to keep this a UI/data-model
+/// evolution instead of a schema rewrite:
+/// - `DockerExec`: `address` is the Docker daemon socket or host (e.g.
+///   `unix:///var/run/docker.sock`, `tcp://10.0.4.12:2375`). `port`,
+///   `username`, `auth` and the SSH-only fields below are unused — unless
+///   `docker_via_host_id` is set, in which case `address` is ignored
+///   entirely and the daemon is reached by tunnelling through that other
+///   (SSH) host instead (see `Host::docker_via_host_id`).
+/// - `K8sExec`: `address` is a kubeconfig context name, `username` is the
+///   default namespace. UI-only for now — no backend yet.
+/// - `Rdp`: `address`/`port`/`username` keep their literal meaning; `auth`
+///   is restricted to `Password` in the UI. UI-only for now — no backend yet.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum HostKind {
+    #[default]
+    Ssh,
+    DockerExec,
+    K8sExec,
+    Rdp,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Host {
     pub id: HostId,
     pub label: String,
+    #[serde(default)]
+    pub kind: HostKind,
     pub address: String,
     pub port: u16,
     pub username: String,
     pub auth: AuthMethod,
+    /// `DockerExec` only: reach this host's Docker daemon by tunnelling
+    /// through the referenced (SSH) host rather than connecting to `address`
+    /// directly — see [`docker::connect_via_ssh`](crate::docker::connect_via_ssh).
+    /// `None` (the default) keeps the direct-connection behavior every other
+    /// `HostKind` already has.
+    #[serde(default)]
+    pub docker_via_host_id: Option<HostId>,
     pub group_id: Option<GroupId>,
     /// Ordered list of bastion / jump hosts to traverse before reaching this host.
     /// `jump_via[0]` is the first hop, `jump_via[n-1]` is the last before the target.
@@ -113,10 +146,12 @@ impl Host {
         Self {
             id: Uuid::new_v4(),
             label: label.into(),
+            kind: HostKind::default(),
             address: address.into(),
             port: 22,
             username: username.into(),
             auth: AuthMethod::Agent,
+            docker_via_host_id: None,
             group_id: None,
             jump_via: Vec::new(),
             tags: Vec::new(),
@@ -157,6 +192,10 @@ pub enum PortForwardKind {
     Local,
     /// Listen remotely, forward into the local network.
     Remote,
+    /// Listen locally as a SOCKS5 proxy; destination is chosen per-connection
+    /// by the client instead of being fixed ahead of time. `dest_address` /
+    /// `dest_port` on the owning [`PortForward`] are unused for this kind.
+    Dynamic,
 }
 
 impl std::fmt::Display for PortForwardKind {
@@ -164,6 +203,7 @@ impl std::fmt::Display for PortForwardKind {
         f.write_str(match self {
             PortForwardKind::Local => "Local (-L)",
             PortForwardKind::Remote => "Distant (-R)",
+            PortForwardKind::Dynamic => "SOCKS dynamique (-D)",
         })
     }
 }

@@ -36,9 +36,11 @@ interface TerminalTabProps {
   // Called with each raw keystroke this terminal sends to its own session — used by
   // the live broadcast "synced typing" mode to mirror input to other terminals.
   onInputData?: (data: string) => void;
+  /** When set, execs into this Docker container on `host` instead of opening an SSH shell. */
+  dockerContainerId?: string;
 }
 
-export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(function TerminalTab({ host, isActive, preferences, onDisconnect, onInputData }, ref) {
+export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(function TerminalTab({ host, isActive, preferences, onDisconnect, onInputData, dockerContainerId }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -172,7 +174,9 @@ export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(funct
       if (disposed) return;
       setStatus("connecting");
       try {
-        const id = await api.connectTerminal(host.id);
+        const id = dockerContainerId
+          ? await api.connectDockerExec(host.id, dockerContainerId)
+          : await api.connectTerminal(host.id);
         if (disposed) {
           api.closeTerminal(id).catch(() => {});
           return;
@@ -219,7 +223,7 @@ export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(funct
       if (sessionIdRef.current) api.closeTerminal(sessionIdRef.current).catch(() => {});
       term.dispose();
     };
-  }, [host.id]);
+  }, [host.id, dockerContainerId]);
 
   // Re-fit whenever the container is resized (and is visible).
   useEffect(() => {

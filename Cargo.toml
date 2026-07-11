@@ -4,17 +4,23 @@ resolver = "3"
 # workspace members — kept on disk for reference since nothing is committed
 # to git yet, but no longer built. The UI now lives in `src-tauri` + the
 # React frontend at the repo root.
-members = ["core", "src-tauri"]
+members = ["core", "src-tauri", "rdp-ipc"]
+# `rdp-sidecar` is deliberately NOT a member here — it's its own separate
+# Cargo workspace (see rdp-sidecar/Cargo.toml) so its dependency resolution
+# never has to unify with `russh`'s. `rdp-ipc` has no risky dependencies of
+# its own (just tokio + serde_json), so it's safe to share between both
+# workspaces as a plain path dependency. See CLAUDE.md's "Pourquoi un
+# processus RDP séparé" section.
 
 [workspace.package]
-version = "1.5.0"
+version = "2.0.0"
 edition = "2024"
 license = "PolyForm-Noncommercial-1.0.0"
 
 [workspace.dependencies]
 termius-core = { path = "core" }
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "process"] }
 
 russh = "0.61"
 russh-sftp = "2.3"

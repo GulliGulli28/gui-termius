@@ -7,11 +7,21 @@ use termius_core::sftp::SftpClient;
 use termius_core::ssh::{Connection, ShellInput};
 use tokio::sync::mpsc;
 
-/// A live interactive shell. `connection` is never read directly, only kept
-/// alive: dropping it would tear down the SSH session the shell runs on.
+/// Which backend a [`TerminalSession`] actually runs over. Only `Ssh` needs
+/// to retain anything beyond the input channel: dropping the `Connection`
+/// would tear down the SSH session the shell runs on. A Docker exec session
+/// owns its resources entirely inside the task spawned by
+/// `termius_core::docker::open_exec`, so there's nothing extra to keep alive.
+pub enum TerminalBackend {
+    Ssh(#[allow(dead_code)] Connection),
+    Docker,
+}
+
+/// A live interactive shell (SSH or Docker exec), bridged onto the same
+/// plain byte-stream channels regardless of backend.
 pub struct TerminalSession {
     #[allow(dead_code)]
-    pub connection: Connection,
+    pub backend: TerminalBackend,
     pub input: mpsc::Sender<ShellInput>,
 }
 
@@ -39,6 +49,14 @@ pub struct LocalTerminalSession {
     pub writer: Box<dyn std::io::Write + Send>,
 }
 
+/// A live embedded-RDP session — see `commands::rdp_view` and CLAUDE.md's
+/// "Pourquoi un processus RDP séparé" section. `child` is kept around solely
+/// so `close_rdp_view` can kill the sidecar process; the actual frame data
+/// flows to the frontend via `rdp-view-*` events, not through this struct.
+pub struct RdpViewSession {
+    pub child: tauri_plugin_shell::process::CommandChild,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub workspace: Mutex<Workspace>,
@@ -46,6 +64,7 @@ pub struct AppState {
     pub local_terminals: Mutex<HashMap<String, LocalTerminalSession>>,
     pub panes: Mutex<HashMap<String, Pane>>,
     pub forwards: Mutex<HashMap<PortForwardId, ForwardSession>>,
+    pub rdp_views: Mutex<HashMap<String, RdpViewSession>>,
     /// One cancellation flag per in-flight `upload_file`/`download_file` transfer, keyed by transfer id.
     pub transfers: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Command history for local-terminal ghost-text suggestions, most recent last.

@@ -2,10 +2,11 @@ import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
 import { IconTrash } from "./ui-icons";
-import type { AuthMethod, EnvVar, GroupId, Host, HostId, KeyId, SnippetId, Workspace } from "../lib/types";
+import type { AuthMethod, EnvVar, GroupId, Host, HostId, HostKind, KeyId, SnippetId, Workspace } from "../lib/types";
 import { HostIcon } from "./icons";
 import { IconPicker } from "./IconPicker";
 import { GroupTreePicker } from "./GroupTreePicker";
+import { HOST_KINDS } from "../lib/hostKinds";
 
 interface HostFormProps {
   workspace: Workspace;
@@ -15,10 +16,12 @@ interface HostFormProps {
   onSave: (input: {
     id: HostId | null;
     label: string;
+    kind: HostKind;
     address: string;
     port: number;
     username: string;
     auth: AuthMethod;
+    dockerViaHostId: HostId | null;
     jumpVia: HostId[];
     groupId: GroupId | null;
     tags: string[];
@@ -48,6 +51,7 @@ function jumpChoices(workspace: Workspace, editingId: HostId | null, chain: Host
 
 export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, onDeleteHost, onWorkspaceUpdate }: HostFormProps) {
   const [label, setLabel] = useState(host?.label ?? "");
+  const [kind, setKind] = useState<HostKind>(host?.kind ?? "ssh");
   const [address, setAddress] = useState(host?.address ?? "");
   const [port, setPort] = useState(String(host?.port ?? 22));
   const [username, setUsername] = useState(host?.username ?? "");
@@ -56,6 +60,7 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
   const [keyPath, setKeyPath] = useState(initialKeyAuth?.path ?? "");
   const [keyId, setKeyId] = useState<KeyId | null>(initialKeyAuth?.keyId ?? null);
   const [secret, setSecret] = useState("");
+  const [dockerViaHostId, setDockerViaHostId] = useState<HostId | "">(host?.dockerViaHostId ?? "");
   const [jumpVia, setJumpVia] = useState<HostId[]>(host?.jumpVia ?? []);
   const [groupId, setGroupId] = useState<GroupId | "">(host?.groupId ?? defaultGroupId ?? "");
   const [tags, setTags] = useState<string[]>(host?.tags ?? []);
@@ -73,6 +78,20 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
 
   const choices = jumpChoices(workspace, host?.id ?? null, jumpVia);
   const snippetChoices = workspace.snippets.filter((s) => !startupSnippets.includes(s.id));
+  const bastionChoices = workspace.hosts.filter((h) => (h.kind ?? "ssh") === "ssh" && h.id !== host?.id);
+
+  // Field visibility per kind — see HostKind's doc comment in lib/types.ts for
+  // which field each kind repurposes. Docker exec only needs the address
+  // (daemon socket/host); Kubernetes exec needs address+username (context +
+  // namespace) but nothing SSH-shaped; RDP is SSH-shaped minus bastions/
+  // keepalive/agent-forward/startup-extras, and password-only auth.
+  const showPort = kind === "ssh" || kind === "rdp";
+  const showUsername = kind !== "dockerExec";
+  const showAuthSection = kind === "ssh" || kind === "rdp";
+  const sshOnlyExtras = kind === "ssh";
+  const addressLabel = kind === "k8sExec" ? "Contexte kubeconfig" : kind === "dockerExec" ? "Socket / hôte Docker" : "Adresse";
+  const addressPlaceholder = kind === "dockerExec" ? "unix:///var/run/docker.sock" : kind === "k8sExec" ? "ex: docker-desktop, prod-eu-west" : undefined;
+  const usernameLabel = kind === "k8sExec" ? "Namespace par défaut" : "Utilisateur";
 
   const addStartupSnippet = (id: string) => { if (id) setStartupSnippets((prev) => [...prev, id]); };
   const removeStartupSnippet = (i: number) => setStartupSnippets((prev) => prev.filter((_, idx) => idx !== i));
@@ -129,8 +148,42 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
   };
 
   const submit = () => {
-    if (!label.trim() || !address.trim() || !username.trim()) {
-      setError("Nom, adresse et utilisateur sont requis");
+    if (!label.trim()) {
+      setError("Le nom est requis");
+      return;
+    }
+
+    if (kind === "dockerExec") {
+      if (!address.trim() && !dockerViaHostId) {
+        setError("Le socket/hôte Docker est requis (sauf en passant par un hôte SSH relais)");
+        return;
+      }
+      onSave({
+        id: host?.id ?? null, label: label.trim(), kind, address: address.trim(),
+        port: 0, username: "", auth: "agent", dockerViaHostId: dockerViaHostId || null,
+        jumpVia: [], groupId: groupId || null,
+        tags, startupSnippets: [], envVars: [], icon, secret: null,
+        keepaliveIntervalSecs: null, agentForward: false,
+      });
+      return;
+    }
+
+    if (kind === "k8sExec") {
+      if (!address.trim()) { setError("Le contexte kubeconfig est requis"); return; }
+      onSave({
+        id: host?.id ?? null, label: label.trim(), kind, address: address.trim(),
+        port: 0, username: username.trim(), auth: "agent", dockerViaHostId: null,
+        jumpVia: [], groupId: groupId || null,
+        tags, startupSnippets: [], envVars: [], icon, secret: null,
+        keepaliveIntervalSecs: null, agentForward: false,
+      });
+      return;
+    }
+
+    // ssh / rdp — SSH-shaped fields, RDP just restricts auth to password and
+    // drops the SSH-only extras below.
+    if (!address.trim() || !username.trim()) {
+      setError("Adresse et utilisateur sont requis");
       return;
     }
     const portNum = Number(port);
@@ -138,30 +191,34 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
       setError("Port invalide");
       return;
     }
-    if (authKind === "privateKey" && !keyPath.trim()) {
+    if (kind === "ssh" && authKind === "privateKey" && !keyPath.trim()) {
       setError("Le chemin de la clé privée est requis");
       return;
     }
 
-    const auth: AuthMethod = authKind === "agent" ? "agent" : authKind === "password" ? "password" : { privateKey: { path: keyPath.trim(), keyId } };
+    const auth: AuthMethod = kind === "rdp"
+      ? "password"
+      : authKind === "agent" ? "agent" : authKind === "password" ? "password" : { privateKey: { path: keyPath.trim(), keyId } };
     const keepaliveNum = Number(keepalive);
 
     onSave({
       id: host?.id ?? null,
       label: label.trim(),
+      kind,
       address: address.trim(),
       port: portNum,
       username: username.trim(),
       auth,
-      jumpVia,
+      dockerViaHostId: null,
+      jumpVia: sshOnlyExtras ? jumpVia : [],
       groupId: groupId || null,
       tags,
-      startupSnippets,
-      envVars: envVars.filter((v) => v.key.trim()),
+      startupSnippets: sshOnlyExtras ? startupSnippets : [],
+      envVars: sshOnlyExtras ? envVars.filter((v) => v.key.trim()) : [],
       icon,
       secret: secret || null,
-      keepaliveIntervalSecs: Number.isInteger(keepaliveNum) && keepaliveNum > 0 ? keepaliveNum : null,
-      agentForward: authKind === "agent" && agentForward,
+      keepaliveIntervalSecs: sshOnlyExtras && Number.isInteger(keepaliveNum) && keepaliveNum > 0 ? keepaliveNum : null,
+      agentForward: sshOnlyExtras && authKind === "agent" && agentForward,
     });
   };
 
@@ -174,6 +231,29 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
 
         <Field label="Nom">
           <input value={label} onChange={(e) => setLabel(e.target.value)} className={inputClass} />
+        </Field>
+
+        <Field label="Type de connexion">
+          <div className="grid grid-cols-2 gap-1.5">
+            {HOST_KINDS.map(({ key, label: kindLabel, Icon }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => {
+                  setKind(key);
+                  if (key === "rdp") {
+                    setAuthKind("password");
+                    if (!host && port === "22") setPort("3389");
+                  }
+                }}
+                className={`flex items-center justify-center gap-1.5 rounded-md border py-2 text-[13px] font-medium transition-all ${
+                  kind === key ? "accent-surface" : "border-transparent bg-[var(--c-bg3)] text-[var(--c-text-secondary)] hover:bg-white/5"
+                }`}
+              >
+                <Icon size={14} /> {kindLabel}
+              </button>
+            ))}
+          </div>
         </Field>
 
         <Field label="Icône">
@@ -215,29 +295,77 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
           </div>
         </Field>
 
-        <Field label="Adresse">
-          <input value={address} onChange={(e) => setAddress(e.target.value)} className={`${inputClass} font-mono`} />
+        <Field label={addressLabel}>
+          <input
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+            placeholder={dockerViaHostId ? "ignoré : voir l'hôte SSH relais ci-dessous" : addressPlaceholder}
+            disabled={kind === "dockerExec" && !!dockerViaHostId}
+            className={`${inputClass} font-mono disabled:opacity-40`}
+          />
         </Field>
-        <Field label="Port">
-          <input value={port} onChange={(e) => setPort(e.target.value)} inputMode="numeric" className={`${inputClass} font-mono`} />
-        </Field>
-        <Field label="Utilisateur">
-          <input value={username} onChange={(e) => setUsername(e.target.value)} className={inputClass} />
-        </Field>
+        {kind === "dockerExec" && (
+          <p className="-mt-2 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
+            Un démon Docker apparaît comme une seule entrée. Se connecter dessus liste les conteneurs en direct et laisse choisir la cible à exécuter.
+          </p>
+        )}
+        {kind === "dockerExec" && (
+          <Field label="Via un hôte SSH (bastion)">
+            <select
+              value={dockerViaHostId}
+              onChange={(e) => setDockerViaHostId(e.target.value as HostId | "")}
+              className={inputClass}
+            >
+              <option value="">Aucun (connexion directe au socket/hôte ci-dessus)</option>
+              {bastionChoices.map((h) => (
+                <option key={h.id} value={h.id}>{h.label}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
+              {dockerViaHostId
+                ? "Le démon Docker par défaut de cet hôte SSH sera utilisé (docker system dial-stdio) — le champ socket/hôte ci-dessus est ignoré ; il faut juste que la commande docker soit installée côté distant."
+                : "Utile quand le démon Docker distant n'expose pas de port TCP : passe par une session SSH déjà configurée plutôt que par le socket/hôte ci-dessus."}
+            </p>
+          </Field>
+        )}
+        {kind === "k8sExec" && (
+          <p className="-mt-2 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
+            Authentifié via kubeconfig, pas par adresse/port. Un cluster apparaît comme une seule entrée — la sélection du pod se fait au moment de la connexion. Non branché à un backend pour l'instant.
+          </p>
+        )}
+        {showPort && (
+          <Field label="Port">
+            <input value={port} onChange={(e) => setPort(e.target.value)} inputMode="numeric" className={`${inputClass} font-mono`} />
+          </Field>
+        )}
+        {showUsername && (
+          <Field label={usernameLabel}>
+            <input value={username} onChange={(e) => setUsername(e.target.value)} className={inputClass} />
+          </Field>
+        )}
 
-        <Field label="Keepalive (secondes, 0 = désactivé)">
-          <input value={keepalive} onChange={(e) => setKeepalive(e.target.value)} inputMode="numeric" className={inputClass} />
-        </Field>
+        {sshOnlyExtras && (
+          <Field label="Keepalive (secondes, 0 = désactivé)">
+            <input value={keepalive} onChange={(e) => setKeepalive(e.target.value)} inputMode="numeric" className={inputClass} />
+          </Field>
+        )}
 
-        <Field label="Authentification">
-          <select value={authKind} onChange={(e) => setAuthKind(e.target.value as AuthKind)} className={inputClass}>
-            <option value="agent">Agent SSH</option>
-            <option value="password">Mot de passe</option>
-            <option value="privateKey">Clé privée</option>
-          </select>
-        </Field>
+        {showAuthSection && (
+          <Field label="Authentification">
+            <select value={authKind} onChange={(e) => setAuthKind(e.target.value as AuthKind)} className={inputClass}>
+              {kind !== "rdp" && <option value="agent">Agent SSH</option>}
+              <option value="password">Mot de passe</option>
+              {kind !== "rdp" && <option value="privateKey">Clé privée</option>}
+            </select>
+          </Field>
+        )}
+        {kind === "rdp" && (
+          <p className="-mt-2 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
+            Ouvre le client RDP du système avec ces identifiants — pas de rendu intégré dans l'appli pour cette première version.
+          </p>
+        )}
 
-        {authKind === "agent" && (
+        {showAuthSection && authKind === "agent" && (
           <label className="flex items-start gap-2 rounded-md bg-[var(--c-bg3)]/60 p-2.5">
             <input
               type="checkbox"
@@ -255,7 +383,7 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
           </label>
         )}
 
-        {authKind === "privateKey" && (
+        {showAuthSection && authKind === "privateKey" && (
           <>
             {workspace.keychain.length > 0 && (
               <Field label="Clé du trousseau">
@@ -323,12 +451,13 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
             </Field>
           </>
         )}
-        {(authKind === "password" || authKind === "privateKey") && (
+        {showAuthSection && (authKind === "password" || authKind === "privateKey") && (
           <Field label={authKind === "password" ? "Mot de passe" : "Passphrase (optionnelle)"}>
             <input value={secret} onChange={(e) => setSecret(e.target.value)} type="password" className={inputClass} />
           </Field>
         )}
 
+        {sshOnlyExtras && (
         <Field label="Chaîne de bastions">
           <div className="space-y-1 rounded-md bg-[var(--c-bg3)] p-2">
             {jumpVia.length === 0 && <p className="py-0.5 text-xs text-[var(--c-text-muted)]">Connexion directe (aucun bastion)</p>}
@@ -354,6 +483,7 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
             )}
           </div>
         </Field>
+        )}
 
         <Field label="Dossier">
           <GroupTreePicker
@@ -364,6 +494,7 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
           />
         </Field>
 
+        {sshOnlyExtras && (
         <Field label="Snippets au démarrage">
           <div className="space-y-1 rounded-md bg-[var(--c-bg3)] p-2">
             {startupSnippets.length === 0 && <p className="py-0.5 text-xs text-[var(--c-text-muted)]">Aucun snippet au démarrage</p>}
@@ -389,7 +520,9 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
             )}
           </div>
         </Field>
+        )}
 
+        {sshOnlyExtras && (
         <Field label="Variables d'environnement">
           <div className="space-y-1.5 rounded-md bg-[var(--c-bg3)] p-2">
             {envVars.length === 0 && <p className="py-0.5 text-xs text-[var(--c-text-muted)]">Aucune variable définie</p>}
@@ -415,6 +548,7 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
             </button>
           </div>
         </Field>
+        )}
 
         <Field label="Étiquettes">
           <div className="flex flex-wrap gap-1.5 rounded-md bg-[var(--c-bg3)] p-2">

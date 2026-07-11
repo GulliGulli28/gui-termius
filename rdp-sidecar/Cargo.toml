@@ -1,0 +1,54 @@
+# This crate is its own Cargo workspace (see [workspace] below), deliberately
+# NOT a member of the repo's root workspace. It must never depend on
+# `termius-core` (or anything else that pulls in `russh`): `russh` pins
+# `ecdsa = "=0.17.0-rc.18"` while `ironrdp-connector` (via `picky`) pins
+# `ecdsa = "=0.17.0-rc.22"` — two different exact prereleases of the same
+# crate that cannot coexist in one dependency graph. A plain crate-in-the-
+# same-workspace setup was tried first and hit exactly this conflict, since
+# Cargo unifies dependency resolution across *all* members of one workspace
+# regardless of whether they depend on each other. See CLAUDE.md's "Pourquoi
+# un processus RDP séparé" section for the full story.
+[workspace]
+members = ["."]
+
+[package]
+name = "rdp-sidecar"
+version = "1.5.0"
+edition = "2024"
+license = "PolyForm-Noncommercial-1.0.0"
+
+[dependencies]
+rdp-ipc = { path = "../rdp-ipc" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
+anyhow = "1"
+tracing = "0.1"
+# `env-filter`: lets the parent process opt a running session into finer
+# logging (e.g. `RUST_LOG=ironrdp_session=debug`) via the `RUST_LOG` env var
+# it sets when spawning this sidecar (see `commands/rdp_view.rs`) — without
+# this feature, `fmt().init()` hardcodes `LevelFilter::INFO` and ignores
+# `RUST_LOG` entirely, silently dropping the `debug!`/`trace!` calls inside
+# `ironrdp-session` that would otherwise show exactly what a resize's
+# post-reactivation Fast-Path decode saw (compression flags, fragmentation,
+# decompressed size) — found by checking the vendored source, not assumed.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+ironrdp = { version = "0.16", features = ["connector", "session", "graphics", "displaycontrol", "dvc", "echo", "input", "cliprdr"] }
+ironrdp-tokio = { version = "0.9", features = ["reqwest-rustls-ring"] }
+ironrdp-tls = { version = "0.2", features = ["rustls"] }
+# Referenced directly only to call `install_default()` at startup — see the
+# comment in main.rs. Both `ring` and `aws-lc-rs` end up in the dependency
+# graph regardless (reqwest and ironrdp-tls don't agree on a default), so
+# rustls 0.23 refuses to pick one implicitly; "ring" here just has to match
+# ironrdp-tokio's `reqwest-rustls-ring` feature above.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+# `WinClipboard` (Windows) does real OS clipboard reads/writes internally;
+# `StubClipboard` (everywhere else) is a real, complete no-op — see
+# clipboard.rs and CLAUDE.md's "RDP intégré" section.
+ironrdp-cliprdr-native = "0.6"
+
+# Only for running a Win32 message loop on the dedicated clipboard thread
+# (GetMessageW/TranslateMessage/DispatchMessageW) — see clipboard.rs.
+# `ironrdp-cliprdr-native` doesn't re-export these itself. Target-gated so
+# non-Windows builds never even try to resolve/compile it.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }

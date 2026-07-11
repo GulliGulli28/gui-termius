@@ -188,11 +188,12 @@ export function SettingsPanel({ workspace, onWorkspaceUpdate, onError, preferenc
               key={c.key}
               onClick={() => setCategory(c.key)}
               title={c.label}
-              className={`relative flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${
-                active ? "bg-[var(--c-accent-dim)] text-[var(--c-accent-text)]" : "text-[var(--c-text-muted)] hover:bg-white/5 hover:text-[var(--c-text-secondary)]"
+              className={`relative flex h-10 w-10 items-center justify-center rounded-lg border transition-all duration-150 ${
+                active
+                  ? "accent-surface"
+                  : "border-transparent text-[var(--c-text-muted)] hover:bg-white/5 hover:text-[var(--c-text-secondary)]"
               }`}
             >
-              {active && <span className="absolute right-0 top-1.5 bottom-1.5 w-[2px] rounded-full bg-[var(--c-accent)]" />}
               <c.Icon size={19} />
             </button>
           );

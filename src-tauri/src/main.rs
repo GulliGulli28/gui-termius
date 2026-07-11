@@ -41,6 +41,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_shell::init())
         .manage(app_state)
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main")
@@ -63,6 +64,15 @@ fn main() {
             commands::hosts::add_private_key,
             commands::hosts::delete_private_key,
             commands::hosts::rename_private_key,
+            commands::keys::generate_private_key,
+            commands::keys::get_public_key,
+            commands::keys::deploy_public_key,
+            commands::docker::list_docker_containers,
+            commands::docker::connect_docker_exec,
+            commands::rdp::connect_rdp,
+            commands::rdp_view::connect_rdp_view,
+            commands::rdp_view::send_rdp_view_input,
+            commands::rdp_view::close_rdp_view,
             commands::hosts::add_custom_icon,
             commands::hosts::delete_custom_icon,
             commands::hosts::read_icon_file,
