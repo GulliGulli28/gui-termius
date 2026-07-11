@@ -447,19 +447,43 @@ Deux emplacements différents comptent, pour deux étapes différentes :
   un serveur RDP réellement joignable, ce qu'aucun environnement de dev
   utilisé jusqu'ici ne fournit.
 
-### CI : ce que `--workspace` ne couvre pas
+### CI : `rdp-sidecar` (2026-07-11 : corrigé — cassait tout `windows-workspace`)
 
 Les commandes `cargo clippy --workspace`/`cargo build --workspace` du job
 `windows-workspace` (`.github/workflows/ci.yml`) résolvent le workspace
 racine (`core` + `src-tauri` + `rdp-ipc`) — **elles ne touchent jamais
 `rdp-sidecar`**, exactement pour la raison qui a motivé sa séparation
-(isolation de workspace). Il n'y a pour l'instant **aucun job CI dédié** qui
-compile/lint `rdp-sidecar` : un warning clippy ou une régression de
-compilation là-dedans passerait inaperçu jusqu'à ce que quelqu'un tente une
-release. À ajouter si ce code continue d'évoluer (job séparé, `cd
-rdp-sidecar && cargo clippy --all-targets -- -D warnings`, sur
-`ubuntu-latest` a minima — Windows recommandé aussi vu le lien avec
-`ring`/NASM ci-dessus).
+(isolation de workspace). Longtemps noté ici comme simple lacune de
+couverture (« un warning clippy dedans passerait inaperçu ») — en réalité
+plus grave : `tauri-build`'s `build.rs` vérifie que
+`src-tauri/binaries/rdp-sidecar-x86_64-pc-windows-msvc.exe` existe **avant
+même de compiler `gui-termius`**, et ce fichier est gitignored (jamais
+commité). Sur un checkout CI frais, il n'existe tout simplement pas — donc
+`windows-workspace` **échouait à 100 % dès le premier `cargo clippy
+--workspace`**, sans jamais avoir été détecté jusqu'à ce qu'un commit soit
+réellement tenté après la RDP intégré. `release.yml` construisait déjà
+`rdp-sidecar` et plaçait le binaire avant `tauri-action` (matrix Windows +
+Linux) ; `ci.yml` ne répliquait pas cette étape. Fix : `ci.yml` construit
+maintenant `rdp-sidecar` (debug, pour matcher le `cargo build --workspace`
+du même job) et copie le binaire au bon endroit *avant* `Clippy (workspace)`
+— sans quoi tout le reste du job échoue à ce même endroit, pas seulement le
+lint de `rdp-sidecar`. Un job clippy dédié à `rdp-sidecar` a aussi été ajouté
+(`core`, Linux, rapide ; `windows-workspace`, pour le chemin `WinClipboard`
+réel) — l'ancienne lacune de couverture, elle, réellement comblée cette
+fois.
+
+**Piège NASM sur `windows-latest` — vérifié, pas supposé.** `release.yml`
+construisait déjà `rdp-sidecar` sans installer NASM explicitement, en
+s'appuyant implicitement sur le contenu de l'image du runner hébergé
+(différent de cette machine de dev, où NASM a dû être installé à la main —
+voir plus haut). Vérifié via le manifeste logiciel officiel
+(`actions/runner-images`) : l'image Windows Server 2025/VS2026 vers laquelle
+`windows-latest` a fini de migrer début juillet 2026 **ne liste pas NASM**.
+Rien ne garantit que `release.yml` fonctionnait encore au moment d'écrire ces
+lignes — pas testé en conditions réelles suite à ce changement d'image, la
+lacune a juste été repérée en vérifiant la doc plutôt que découverte par un
+échec. Fix : `ilammy/setup-nasm@v1` ajouté explicitement dans `ci.yml` *et*
+`release.yml`, plutôt que de parier sur le contenu de l'image.
 
 ### Protocole `rdp-ipc`
 

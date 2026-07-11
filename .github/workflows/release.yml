@@ -47,6 +47,13 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # aws-lc-sys/ring (rdp-sidecar's TLS stack) need NASM to build their
+      # assembly routines under MSVC — not reliably present on windows-latest
+      # (checked the current runner image's software manifest: no NASM listed
+      # as of the Windows Server 2025/VS2026 image windows-latest now points
+      # to), so install it explicitly rather than assume. No-op on Linux.
+      - uses: ilammy/setup-nasm@v1
+
       # rdp-sidecar is its own separate Cargo workspace (see rdp-sidecar/Cargo.toml
       # and CLAUDE.md's "RDP intégré : architecture sidecar" section) — the root
       # `cargo build --workspace` never touches it, and tauri-action's `tauri build`

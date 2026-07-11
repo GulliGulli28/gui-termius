@@ -20,6 +20,13 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # rdp-sidecar is its own separate Cargo workspace (own Cargo.lock —
+          # see CLAUDE.md's "Pourquoi un processus RDP séparé"), so it needs
+          # its own cache entry; the default only picks up the root workspace.
+          workspaces: |
+            . -> target
+            rdp-sidecar -> target
 
       # The integration tests spawn a real sshd (core/tests/common/mod.rs) to
       # talk to over a loopback connection; ubuntu-latest doesn't ship it.
@@ -31,6 +38,15 @@ jobs:
 
       - name: Test (termius-core)
         run: cargo test -p termius-core --all-targets
+
+      # Cheap, fast (no WebView2/Windows overhead) Linux-side coverage for
+      # rdp-sidecar's cross-platform code (StubClipboard, no `#[cfg(windows)]`
+      # branches) — `--workspace` above never touches this crate at all since
+      # it's a separate workspace on purpose. Not a substitute for the
+      # Windows-side check in `windows-workspace` (the `WinClipboard`/`ring`+
+      # NASM path only compiles there), but catches most regressions faster.
+      - name: Clippy (rdp-sidecar)
+        run: cd rdp-sidecar && cargo clippy --all-targets -- -D warnings
 
   windows-workspace:
     # Full workspace (including the Tauri binary) mirrors release.yml's
@@ -48,9 +64,45 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # rdp-sidecar is its own separate Cargo workspace (own Cargo.lock —
+          # see CLAUDE.md's "Pourquoi un processus RDP séparé"), so it needs
+          # its own cache entry; the default only picks up the root workspace.
+          workspaces: |
+            . -> target
+            rdp-sidecar -> target
 
       - name: Install frontend dependencies
         run: npm ci
+
+      # aws-lc-sys/ring (rdp-sidecar's TLS stack) need NASM to build their
+      # assembly routines under MSVC — not reliably present on windows-latest
+      # (checked the current runner image's software manifest: no NASM listed
+      # as of the Windows Server 2025/VS2026 image windows-latest now points
+      # to), so install it explicitly rather than assume.
+      - uses: ilammy/setup-nasm@v1
+
+      # rdp-sidecar is its own separate Cargo workspace — the root
+      # `cargo clippy/build --workspace` below never touches it, and
+      # tauri-build's build.rs checks `bundle.externalBin` paths exist even
+      # just to compile the main crate (not only to package it), so every
+      # step below needs this binary in place first or they all fail outright
+      # with "resource path ... doesn't exist". Mirrors release.yml's
+      # equivalent step (which builds `--release`, for packaging); this one
+      # builds debug to match this job's own `cargo build --workspace` below.
+      - name: Build rdp-sidecar and stage it for bundling
+        shell: bash
+        run: |
+          cd rdp-sidecar && cargo build
+          mkdir -p ../src-tauri/binaries
+          cp target/debug/rdp-sidecar.exe ../src-tauri/binaries/rdp-sidecar-x86_64-pc-windows-msvc.exe
+
+      # Windows-side coverage for rdp-sidecar's own code, including the
+      # `WinClipboard`/`ring`+NASM path that only compiles on this platform
+      # (see CLAUDE.md) — the Linux-side check in the `core` job above is
+      # faster but can't reach this code at all.
+      - name: Clippy (rdp-sidecar)
+        run: cd rdp-sidecar && cargo clippy --all-targets -- -D warnings
 
       - name: Clippy (workspace)
         run: cargo clippy --workspace --all-targets -- -D warnings
