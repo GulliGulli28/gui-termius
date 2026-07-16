@@ -240,12 +240,21 @@ pub async fn open_local_terminal(app: AppHandle, state: State<'_, AppState>, she
 }
 
 #[tauri::command]
-pub async fn write_local_terminal(state: State<'_, AppState>, session_id: String, data: String) -> Result<(), String> {
-    use std::io::Write;
+pub async fn write_local_terminal(app: AppHandle, session_id: String, data: String) -> Result<(), String> {
     let bytes = util::decode(&data).map_err(|e| e.to_string())?;
-    let mut sessions = state.local_terminals.lock_recover();
-    let session = sessions.get_mut(&session_id).ok_or_else(|| "session inconnue".to_string())?;
-    session.writer.write_all(&bytes).map_err(|e| e.to_string())
+    // The write is a blocking std::io::Write call (kernel PTY buffer) — every
+    // keystroke to a local terminal goes through this command, so keep it off
+    // the tokio worker thread the same way the read side already does.
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        let mut sessions = state.local_terminals.lock_recover();
+        let session = sessions.get_mut(&session_id).ok_or_else(|| "session inconnue".to_string())?;
+        session.writer.write_all(&bytes).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

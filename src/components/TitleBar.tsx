@@ -57,7 +57,7 @@ export function TitleBar({
             height={20}
             className="rounded-md shadow-[0_0_8px_1px_color-mix(in_srgb,var(--c-accent)_45%,transparent)]"
           />
-          <span className="text-[12px] font-semibold tracking-wider text-[var(--c-text-secondary)]">gui-termius</span>
+          <span className="text-[12px] font-semibold tracking-wider text-[var(--c-text-secondary)]">Guiterm</span>
         </div>
         <NotificationBell
           notifications={notifications}

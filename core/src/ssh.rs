@@ -60,7 +60,18 @@ impl client::Handler for AppHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        match known_hosts::check_and_trust(&self.identity, &self.label, server_public_key) {
+        let identity = self.identity.clone();
+        let label = self.label.clone();
+        let key = server_public_key.clone();
+        // known_hosts::check_and_trust does synchronous disk I/O — run it off the
+        // tokio worker thread so a slow/contended handshake doesn't stall other
+        // async work sharing it.
+        let verdict = tokio::task::spawn_blocking(move || {
+            known_hosts::check_and_trust(&identity, &label, &key)
+        })
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("check_and_trust panicked: {e}")));
+        match verdict {
             Ok(Verdict::AlreadyTrusted | Verdict::NewlyTrusted) => Ok(true),
             Ok(Verdict::Mismatch {
                 previous_fingerprint,
@@ -454,6 +465,59 @@ pub async fn open_shell(
     Ok(ShellSession {
         input: input_tx,
         output: output_rx,
+    })
+}
+
+/// Captured result of running a command to completion on a remote host.
+#[derive(Debug, Clone)]
+pub struct CommandOutput {
+    /// Exit status reported by the remote command. `None` if the channel closed
+    /// without an `exit-status` (e.g. the command was killed by a signal — see
+    /// [`run_command_capture`]).
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Runs `command` on `connection`'s target host to completion — non-interactive,
+/// no PTY (unlike [`open_shell`]) — capturing stdout, stderr and the exit status
+/// separately. This is the "exec + capture" path the fleet executor needs: an
+/// interactive shell streams raw bytes with no notion of an exit code, which a
+/// structured fan-out run has to report per host.
+pub async fn run_command_capture(
+    connection: &Connection,
+    command: &str,
+) -> anyhow::Result<CommandOutput> {
+    let mut channel = connection.target().channel_open_session().await?;
+    channel.exec(true, command).await?;
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let mut exit_code: Option<i32> = None;
+    // Read until the channel actually closes. `exit-status` normally arrives
+    // before EOF, but the SSH spec doesn't guarantee ordering, so don't stop on
+    // `Eof` — only on `Close`/channel drop — to avoid dropping a late status.
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+            // ext == 1 is SSH_EXTENDED_DATA_STDERR; fold any other extended data
+            // in with stderr rather than discarding it.
+            ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
+            ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status as i32),
+            ChannelMsg::ExitSignal { signal_name, error_message, .. } => {
+                stderr.extend_from_slice(
+                    format!("[interrompu par signal {signal_name:?}] {error_message}").as_bytes(),
+                );
+            }
+            ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+
+    Ok(CommandOutput {
+        exit_code,
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
 }
 

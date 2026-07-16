@@ -305,11 +305,8 @@ export function TransferTab({ host, workspace, preferences, onError, onPushed, d
     const paneId = paneIds.current[side];
     if (!paneId) return;
     try {
-      let result: PaneListed | null = null;
-      for (const entry of entries) {
-        result = await api.paneRemove(paneId, state[side].cwd, entry);
-      }
-      if (result) dispatch({ type: "listed", side, result });
+      const result = await api.paneRemove(paneId, state[side].cwd, entries);
+      dispatch({ type: "listed", side, result });
     } catch (e) { onError(String(e)); }
   };
 

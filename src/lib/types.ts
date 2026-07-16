@@ -216,7 +216,54 @@ export interface PaneState {
 
 export type TabMeta =
   | { id: string; kind: "terminal" | "transfer" | "rdp-view"; hostId: HostId; label: string; status?: "connected" | "placeholder"; dockerContainerId?: string }
-  | { id: string; kind: "local-terminal"; label: string; initialCommand?: string; shell?: string | null; status?: "connected" | "placeholder" };
+  | { id: string; kind: "local-terminal"; label: string; initialCommand?: string; shell?: string | null; status?: "connected" | "placeholder" }
+  | { id: string; kind: "fleet"; label: string; status?: "connected" | "placeholder" };
+
+/** One host's result in a fleet run (`run_fleet_command` → `fleet-run-outcome`).
+ * Mirrors `termius_core::fleet::HostOutcome`. `exitCode === 0 && error === null`
+ * is success; a non-zero `exitCode` ran but failed; `error` means it never ran
+ * (unreachable, auth, unsupported kind…). */
+export interface FleetOutcome {
+  hostId: HostId;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  error: string | null;
+}
+
+/** Live host state collected by `collect_facts`. Mirrors
+ * `termius_core::facts::HostFacts` — every field is best-effort (`null` when it
+ * couldn't be read). */
+export interface HostFacts {
+  hostname: string | null;
+  osId: string | null;
+  osName: string | null;
+  kernel: string | null;
+  arch: string | null;
+  cpus: number | null;
+  load1: number | null;
+  uptimeSecs: number | null;
+  memTotalMb: number | null;
+  memUsedMb: number | null;
+  memUsedPct: number | null;
+}
+
+/** One host's facts result: `facts` when the probe ran, else `error`. */
+export interface FactsOutcome {
+  hostId: HostId;
+  facts: HostFacts | null;
+  error: string | null;
+}
+
+/** A recorded fleet run (audit trail). Mirrors `termius_core::fleet_history::FleetRun`. */
+export interface FleetRun {
+  id: string;
+  startedAtMs: number;
+  command: string;
+  hostIds: HostId[];
+  outcomes: FleetOutcome[];
+}
 
 export type Tab =
   | { id: string; kind: "terminal"; hostId: HostId; label: string; sessionId: string | null; status: "connecting" | "open" | "failed"; error?: string }

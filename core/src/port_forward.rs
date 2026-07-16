@@ -20,10 +20,6 @@ enum ActiveKind {
 }
 
 impl ActiveForward {
-    pub fn config(&self) -> &PortForward {
-        &self.config
-    }
-
     pub async fn stop(self, connection: &Connection) {
         match self.kind {
             ActiveKind::Local(accept_loop) => accept_loop.abort(),

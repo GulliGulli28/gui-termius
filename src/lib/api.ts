@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AuthMethod, DockerContainer, EnvVar, Entry, GroupId, HostId, HostKind, ImportSelection, KeyAlgorithm, KeyId, KnownHostEntry, PaneListed, PaneOpened, PaneSource, PortForwardId, PortForwardKind, RdpClientMessage, RdpFrame, SnippetId, SshConfigHost, TransferProgressEvent, VaultStatus, Workspace } from "./types";
+import type { AuthMethod, DockerContainer, EnvVar, Entry, FactsOutcome, FleetOutcome, FleetRun, GroupId, HostId, HostKind, ImportSelection, KeyAlgorithm, KeyId, KnownHostEntry, PaneListed, PaneOpened, PaneSource, PortForwardId, PortForwardKind, RdpClientMessage, RdpFrame, SnippetId, SshConfigHost, TransferProgressEvent, VaultStatus, Workspace } from "./types";
 
 /** Mirrors the 12-byte little-endian header `commands::rdp_view::connect_rdp_view`
  * writes ahead of each frame's raw RGBA8 pixels (see its doc comment for why
@@ -134,12 +134,26 @@ export const api = {
     invoke<PaneListed>("copy_entry", { sourcePaneId, sourceCwd, entry, destPaneId, destCwd }),
   paneMkdir: (paneId: string, cwd: string, name: string) => invoke<PaneListed>("pane_mkdir", { paneId, cwd, name }),
   paneRename: (paneId: string, cwd: string, oldName: string, newName: string) => invoke<PaneListed>("pane_rename", { paneId, cwd, oldName, newName }),
-  paneRemove: (paneId: string, cwd: string, entry: Entry) => invoke<PaneListed>("pane_remove", { paneId, cwd, entry }),
+  paneRemove: (paneId: string, cwd: string, entries: Entry[]) => invoke<PaneListed>("pane_remove", { paneId, cwd, entries }),
   paneChmod: (paneId: string, cwd: string, name: string, mode: number) => invoke<PaneListed>("pane_chmod", { paneId, cwd, name, mode }),
   readPaneFile: (paneId: string, cwd: string, name: string) => invoke<string>("read_pane_file", { paneId, cwd, name }),
   writePaneFile: (paneId: string, cwd: string, name: string, content: string) => invoke<void>("write_pane_file", { paneId, cwd, name, content }),
   uploadPaths: (paneId: string, cwd: string, localPaths: string[]) => invoke<string[]>("upload_paths", { paneId, cwd, localPaths }),
   cancelTransfer: (transferId: string) => invoke<void>("cancel_transfer", { transferId }),
+
+  /** Runs `command` on every host in `hostIds` (SSH only) off any PTY. Resolves
+   * once every host has reported; per-host results stream in via
+   * `onFleetOutcome`, followed by `onFleetDone`. `runId` (mint with
+   * `crypto.randomUUID()`) tells concurrent runs apart on the shared events. */
+  runFleetCommand: (runId: string, hostIds: HostId[], command: string) =>
+    invoke<void>("run_fleet_command", { runId, hostIds, command }),
+
+  /** Collects live state (OS, kernel, CPU, load, memory) for `hostIds` (SSH
+   * only), concurrently. Batch: resolves once every host has reported. */
+  collectFacts: (hostIds: HostId[]) => invoke<FactsOutcome[]>("collect_facts", { hostIds }),
+
+  /** The persisted fleet run history (audit trail), newest first. */
+  getFleetHistory: () => invoke<FleetRun[]>("get_fleet_history"),
 };
 
 export function onTransferProgress(handler: (e: TransferProgressEvent) => void): Promise<UnlistenFn> {
@@ -168,6 +182,14 @@ export function onRdpViewError(handler: (id: string, message: string) => void): 
 
 export function onRdpViewClosed(handler: (id: string) => void): Promise<UnlistenFn> {
   return listen<{ id: string }>("rdp-view-closed", (event) => handler(event.payload.id));
+}
+
+export function onFleetOutcome(handler: (runId: string, outcome: FleetOutcome) => void): Promise<UnlistenFn> {
+  return listen<{ runId: string; outcome: FleetOutcome }>("fleet-run-outcome", (event) => handler(event.payload.runId, event.payload.outcome));
+}
+
+export function onFleetDone(handler: (runId: string) => void): Promise<UnlistenFn> {
+  return listen<{ runId: string }>("fleet-run-done", (event) => handler(event.payload.runId));
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {

@@ -41,7 +41,7 @@ const projectRoot = path.resolve(scriptDir, "..");
 // this script agree on where the binary landed without duplicating the path
 // in two places. Defaults mirror what each platform's setup actually uses.
 const cargoTargetDir = process.env.CARGO_TARGET_DIR
-  || (isWindows ? path.join(os.homedir(), "gui-termius-target-windows") : path.join(projectRoot, "target"));
+  || (isWindows ? path.join(os.homedir(), "guiterm-target-windows") : path.join(projectRoot, "target"));
 
 // Debug builds load `build.devUrl` (needs a running Vite dev server); release
 // builds embed `frontendDist` (the already-built `dist/`, which is plain
@@ -52,7 +52,7 @@ const cargoTargetDir = process.env.CARGO_TARGET_DIR
 // entirely; override with E2E_BUILD_PROFILE=debug|release if needed.
 const buildProfile = process.env.E2E_BUILD_PROFILE || (isWindows ? "release" : "debug");
 const needsViteDevServer = buildProfile === "debug";
-const appBinary = path.join(cargoTargetDir, buildProfile, isWindows ? "gui-termius.exe" : "gui-termius");
+const appBinary = path.join(cargoTargetDir, buildProfile, isWindows ? "guiterm.exe" : "guiterm");
 
 // Where the platform's native WebDriver binary lives.
 const nativeDriverPath = isWindows
@@ -104,9 +104,9 @@ function waitForPort(port, timeoutMs) {
 
 /** Add new real-window scenarios here as the suite grows. */
 async function runScenarios(browser) {
-  await browser.waitUntil(async () => (await browser.getTitle()) === "gui-termius", {
+  await browser.waitUntil(async () => (await browser.getTitle()) === "Guiterm", {
     timeout: 10_000,
-    timeoutMsg: "le titre de la fenêtre n'est jamais devenu \"gui-termius\"",
+    timeoutMsg: "le titre de la fenêtre n'est jamais devenu \"Guiterm\"",
   });
 
   const html = await browser.getPageSource();

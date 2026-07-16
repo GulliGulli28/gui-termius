@@ -29,11 +29,11 @@ async fn sftp_round_trip() {
         .expect("open sftp session");
 
     let home = client.home_dir().await.expect("home dir");
-    let dir = sftp::join(&home, &format!("gui-termius-test-{}", Uuid::new_v4()));
+    let dir = sftp::join(&home, &format!("guiterm-test-{}", Uuid::new_v4()));
     client.make_dir(&dir).await.expect("mkdir");
 
     let remote_file = sftp::join(&dir, "hello.txt");
-    let local_src = std::env::temp_dir().join(format!("gui-termius-upload-{}.txt", Uuid::new_v4()));
+    let local_src = std::env::temp_dir().join(format!("guiterm-upload-{}.txt", Uuid::new_v4()));
     tokio::fs::write(&local_src, b"hello sftp").await.unwrap();
 
     client
@@ -48,7 +48,7 @@ async fn sftp_round_trip() {
     assert_eq!(entries[0].size, "hello sftp".len() as u64);
 
     let local_dst =
-        std::env::temp_dir().join(format!("gui-termius-download-{}.txt", Uuid::new_v4()));
+        std::env::temp_dir().join(format!("guiterm-download-{}.txt", Uuid::new_v4()));
     client
         .download(
             &remote_file,

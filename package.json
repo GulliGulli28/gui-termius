@@ -1,8 +1,8 @@
 {
-  "name": "gui-termius",
+  "name": "guiterm",
   "private": true,
-  "version": "2.0.1",
-  "license": "PolyForm-Noncommercial-1.0.0",
+  "version": "2.1.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

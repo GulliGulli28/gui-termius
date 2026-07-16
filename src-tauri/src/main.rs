@@ -29,10 +29,12 @@ fn main() {
     };
     let local_history = termius_core::command_history::load("local_history.json").unwrap_or_default();
     let ssh_history = termius_core::command_history::load("ssh_history.json").unwrap_or_default();
+    let fleet_history = termius_core::fleet_history::load().unwrap_or_default();
     let app_state = AppState {
         workspace: std::sync::Mutex::new(workspace),
         local_history: std::sync::Mutex::new(local_history),
         ssh_history: std::sync::Mutex::new(ssh_history),
+        fleet_history: std::sync::Mutex::new(fleet_history),
         ..Default::default()
     };
 
@@ -69,6 +71,9 @@ fn main() {
             commands::keys::deploy_public_key,
             commands::docker::list_docker_containers,
             commands::docker::connect_docker_exec,
+            commands::fleet::run_fleet_command,
+            commands::fleet::get_fleet_history,
+            commands::facts::collect_facts,
             commands::rdp_view::connect_rdp_view,
             commands::rdp_view::send_rdp_view_input,
             commands::rdp_view::close_rdp_view,

@@ -19,6 +19,7 @@ interface TabBarProps {
 function TabIcon({ kind }: { kind: TabMeta["kind"] }) {
   if (kind === "terminal") return <IconTerminal size={13} />;
   if (kind === "transfer") return <IconTransfer size={13} />;
+  if (kind === "fleet") return <IconBroadcast size={13} />;
   return <IconMonitor size={13} />;
 }
 

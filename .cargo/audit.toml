@@ -4,7 +4,7 @@ ignore = [
     # auth. "Marvin Attack" timing side-channel — no fix published upstream as
     # of 2026-07. Exploiting it requires an attacker able to measure local
     # decryption timing against attacker-chosen ciphertexts, which doesn't
-    # apply to gui-termius acting as an SSH client. Revisit when russh/rsa
+    # apply to guiterm acting as an SSH client. Revisit when russh/rsa
     # ships a fix: https://rustsec.org/advisories/RUSTSEC-2023-0071
     "RUSTSEC-2023-0071",
 

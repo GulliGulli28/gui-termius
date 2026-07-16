@@ -170,7 +170,7 @@ fn build_config(request: &ConnectRequest) -> ConnectorConfig {
         // can't be tested against a real server before shipping.
         bitmap: Some(BitmapConfig { color_depth: 32, lossy_compression: true, codecs: BitmapCodecs(Vec::new()) }),
         client_build: 0,
-        client_name: "gui-termius".to_string(),
+        client_name: "guiterm".to_string(),
         client_dir: String::new(),
         platform: MajorPlatformType::UNSPECIFIED,
         hardware_id: None,

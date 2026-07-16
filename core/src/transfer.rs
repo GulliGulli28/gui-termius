@@ -29,7 +29,13 @@ pub enum PaneRef {
 
 pub async fn list(pane: &PaneRef, path: &str) -> anyhow::Result<Vec<Entry>> {
     match pane {
-        PaneRef::Local => local_fs::list(path),
+        // local_fs::list does synchronous std::fs I/O — run it off the tokio
+        // worker thread so a large/slow (network-mounted, AV-scanned) directory
+        // doesn't stall other async work sharing that thread.
+        PaneRef::Local => {
+            let path = path.to_string();
+            tokio::task::spawn_blocking(move || local_fs::list(&path)).await?
+        }
         PaneRef::Remote(client) => client.list(path).await,
     }
 }
@@ -290,7 +296,7 @@ async fn download_client_to_fresh_temp(
     name: &str,
     size: u64,
 ) -> anyhow::Result<std::path::PathBuf> {
-    let tmp = std::env::temp_dir().join(format!("gui-termius-transfer-{}", uuid::Uuid::new_v4()));
+    let tmp = std::env::temp_dir().join(format!("guiterm-transfer-{}", uuid::Uuid::new_v4()));
     // Pre-create the relay file 0600 so the copied bytes are never briefly
     // world-readable in a shared /tmp; `download`'s `File::create` truncates it
     // but preserves this owner-only mode on an existing file.

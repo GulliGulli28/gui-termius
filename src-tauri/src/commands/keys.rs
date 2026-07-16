@@ -47,7 +47,7 @@ pub fn generate_private_key(
     let key = PrivateKey {
         id,
         name,
-        path: format!("(clé générée dans gui-termius, id {id})"),
+        path: format!("(clé générée dans Guiterm, id {id})"),
         content: if in_vault {
             None
         } else {

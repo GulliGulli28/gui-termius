@@ -10,7 +10,7 @@ use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 async fn write_json_line(mut w: impl AsyncWrite + Unpin, value: &impl Serialize) -> io::Result<()> {
-    let mut line = serde_json::to_string(value).expect("gui-termius types always serialize");
+    let mut line = serde_json::to_string(value).expect("guiterm types always serialize");
     line.push('\n');
     w.write_all(line.as_bytes()).await?;
     w.flush().await
@@ -312,7 +312,7 @@ mod tests {
                 files: vec![
                     PushedFile { local_path: String::new(), name: "sub".to_string(), relative_path: None, is_dir: true, size: 0 },
                     PushedFile {
-                        local_path: "/tmp/gui-termius-abc/nested.txt".to_string(),
+                        local_path: "/tmp/guiterm-abc/nested.txt".to_string(),
                         name: "nested.txt".to_string(),
                         relative_path: Some("sub".to_string()),
                         is_dir: false,

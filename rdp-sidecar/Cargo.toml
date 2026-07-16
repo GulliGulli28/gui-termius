@@ -15,7 +15,7 @@ members = ["."]
 name = "rdp-sidecar"
 version = "1.5.0"
 edition = "2024"
-license = "PolyForm-Noncommercial-1.0.0"
+license = "MIT"
 
 [dependencies]
 rdp-ipc = { path = "../rdp-ipc" }

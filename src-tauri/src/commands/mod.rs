@@ -2,6 +2,8 @@ pub mod command_history;
 pub mod dialog;
 pub mod docker;
 pub mod export;
+pub mod facts;
+pub mod fleet;
 pub mod forward;
 pub mod hosts;
 pub mod keys;

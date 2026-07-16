@@ -27,10 +27,9 @@ struct RdpViewClosedEvent {
 /// decoded framebuffer back as `rdp-view-frame`/`rdp-view-error`/
 /// `rdp-view-closed` events, all carrying this call's returned session id.
 ///
-/// See `core::rdp` for the older launcher-mode alternative (still used by
-/// `connect_rdp`) and CLAUDE.md's "Pourquoi un processus RDP séparé" section
-/// for why this runs in a separate process instead of linking IronRDP
-/// directly into this binary.
+/// See CLAUDE.md's "Pourquoi un processus RDP séparé" section for why this
+/// runs in a separate process instead of linking IronRDP directly into this
+/// binary.
 ///
 /// Mouse/keyboard input is forwarded separately, see `send_rdp_view_input`.
 /// `width`/`height`: the view's container size at connect time (measured by

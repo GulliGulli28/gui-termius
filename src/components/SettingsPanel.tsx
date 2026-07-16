@@ -146,7 +146,7 @@ export function SettingsPanel({ workspace, onWorkspaceUpdate, onError, preferenc
     try {
       const path = await save({
         title: "Exporter la configuration",
-        defaultPath: "termius-config.json",
+        defaultPath: "guiterm-config.json",
         filters: fileFilters,
       });
       if (path) {

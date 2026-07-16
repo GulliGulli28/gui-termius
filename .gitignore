@@ -25,6 +25,10 @@
 # TypeScript incremental build cache
 *.tsbuildinfo
 
+# Emitted by `tsc -b` (composite project reference) for vite.config.ts,
+# regenerated on every `npm run build` — not meant to be tracked.
+/vite.config.d.ts
+
 # Windows "mark of the web" metadata that can end up literally named
 # `<file>:Zone.Identifier` when copied through certain tools — invalid
 # on NTFS (breaks native Windows checkouts) and never useful to track.

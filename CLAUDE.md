@@ -10,10 +10,18 @@ Rules:
 
 ## Le projet en bref
 
-`gui-termius` est un client SSH/SFTP de bureau (Tauri 2 + Rust + React/TypeScript),
-à usage personnel (licence PolyForm Noncommercial). Voir `README.md` pour la
+**Guiterm** (anciennement `gui-termius` — renommé le 2026-07-16, voir la
+section « Renommage » en fin de fichier) est un client SSH/SFTP de bureau
+(Tauri 2 + Rust + React/TypeScript), en licence MIT (open-core — voir la
+section « Stratégie open-core » en fin de fichier). Voir `README.md` pour la
 présentation complète des fonctionnalités et de la structure du dépôt — ce
 fichier-ci se concentre sur ce qui n'est pas évident en lisant juste le code.
+
+Le dépôt (dossiers, chemins de fichiers, nom de crate `termius-core`,
+identifiant de coffre OS, dossier de config `%APPDATA%\gui-termius\...`)
+garde encore `gui-termius`/`termius` à de nombreux endroits internes,
+volontairement — voir la section « Renommage » pour le détail de ce qui a
+changé et ce qui est resté stable.
 
 Découpage du code Rust :
 - `core/` — logique métier pure (SSH via `russh`, SFTP, vault, known_hosts,
@@ -1671,6 +1679,170 @@ lui-même, pas de référence orpheline). `node scripts/e2e-run.mjs` non
 relancé pour ce changement précis (retrait de code, pas de nouvelle
 fonctionnalité UI à valider visuellement) — à faire si un doute survient sur
 le rendu du panneau de fichiers après ce nettoyage.
+
+## Nettoyage général + optimisations (2026-07-12)
+
+Passe de nettoyage demandée par l'utilisateur (« voir s'il y a du code mort à
+supprimer, des optimisations à faire »). `cargo clippy --workspace
+--all-targets -- -D warnings`, `npx tsc --noEmit` et `npm audit` étaient déjà
+propres avant d'y toucher. Trouvé et corrigé dans la foulée (tous vérifiés :
+clippy + tsc + `cargo test -p termius-core -p gui-termius` + `npx vitest run`
++ `node scripts/e2e-run.mjs`, tous verts) :
+- `vite.config.d.ts` (généré par `tsc -b`, projet composite) committé par
+  erreur dès le premier commit — retiré du suivi, ajouté au `.gitignore`.
+- `thiserror`/`rand` dans `core/Cargo.toml` déclarés mais jamais utilisés
+  (le code utilise `anyhow` pour les erreurs, `getrandom`/
+  `chacha20poly1305::aead::rand_core` pour l'aléatoire) — trouvés via
+  `cargo-machete`, confirmés par grep avant suppression. `time = "=0.3.47"`
+  dans `src-tauri/Cargo.toml`, lui aussi flaggé par `cargo-machete`, est un
+  pin de version transitif volontaire (commentaire juste au-dessus) — pas
+  touché.
+- Commentaire de doc obsolète dans `rdp_view.rs` référençant `core::rdp`/
+  `connect_rdp`, supprimés lors du nettoyage RDP du même jour (section
+  précédente) — corrigé.
+- `ActiveForward::config()` (`core/src/port_forward.rs`) : méthode publique
+  jamais appelée nulle part, invisible à clippy (une lib ne warn pas sur du
+  `pub` inutilisé) — trouvée par un agent Explore qui a cross-référencé les
+  symboles `pub` de `core/` contre leurs call sites dans `core/` et
+  `src-tauri/`. Supprimée.
+- **Suppression multiple dans l'explorateur de fichiers, O(n²) → O(n)** :
+  `pane_remove` (`commands/sftp.rs`) relistait tout le répertoire après
+  *chaque* suppression individuelle, et `TransferTab.tsx`'s `remove()`
+  l'appelait une fois par fichier sélectionné en boucle, jetant tous les
+  résultats intermédiaires sauf le dernier. Sur un backend Docker exec,
+  chaque listing relance un `exec` dans le conteneur — supprimer 100
+  fichiers déclenchait ~100 listings inutiles. Fix : `pane_remove` prend
+  maintenant `entries: Vec<Entry>`, supprime tout puis liste une seule fois
+  à la fin ; `api.ts`/`TransferTab.tsx` mis à jour en conséquence (un seul
+  appel au lieu d'une boucle).
+- **Trois blocages du runtime tokio** (I/O synchrone dans du code async,
+  sans `spawn_blocking`) : `known_hosts::check_and_trust` (I/O disque
+  pendant le handshake SSH — fix : clone `identity`/`label`/`PublicKey`
+  puis `spawn_blocking`), `transfer::list` côté `PaneRef::Local`
+  (`local_fs::list` fait des appels `std::fs` synchrones — navigation
+  locale et copie récursive), `write_local_terminal` (écriture PTY
+  bloquante à chaque frappe dans un terminal local — la fonction est passée
+  de `state: State<AppState>` à `app: AppHandle` pour pouvoir récupérer
+  l'état via `app.state::<AppState>()` depuis l'intérieur du
+  `spawn_blocking`, seule façon d'obtenir un handle `'static` puisque
+  `AppState` n'est pas `Clone`).
+
+**Trois optimisations plus lourdes identifiées mais volontairement pas
+faites cette session** (effort/risque plus élevé, ou décision qui appartient
+à l'utilisateur) — à reprendre plus tard :
+
+1. **Sous-ensembles de polices.** `src/main.tsx` importe
+   `@fontsource/{fira-code,jetbrains-mono,source-code-pro,ubuntu-mono}/{400,700}.css`
+   en entier, ce qui embarque tous les charsets Unicode (latin, latin-ext,
+   cyrillic, cyrillic-ext, greek, greek-ext) — ~1.2 Mo au total dans
+   `dist/assets/*.woff*` après build. Remplacer par les imports par
+   sous-ensemble (`.../latin-400.css`) réduirait probablement ça de
+   40-50 %. Risque quasi nul (un caractère hors charset retenu retombe sur
+   une police système, pas de crash) mais nécessite de savoir si
+   l'utilisateur a besoin du cyrillique/grec dans un terminal (sortie ou
+   noms de fichiers distants dans ces charsets) — décision utilisateur, pas
+   une déduction depuis le code.
+2. **Découpage du bundle JS.** Un seul chunk de 809 Ko (non compressé) après
+   `vite build`, sans code-splitting — Vite avertit au-delà de 500 Ko.
+   `React.lazy` sur des panneaux peu utilisés (RDP, K8s) est possible.
+   Gain incertain : app desktop servie en local (pas de coût réseau), le
+   coût réel est le parse/compile JS au démarrage — pas mesuré, donc pas
+   priorisé sans preuve d'un démarrage perçu comme lent.
+3. **Canal binaire pour `terminal-data`** (au lieu de JSON+base64 par
+   chunk). `spawn_output_bridge`/`open_local_terminal`
+   (`commands/terminal.rs`) émettent chaque chunk de sortie SSH/Docker/PTY
+   local en base64 dans un event Tauri JSON classique — exactement le
+   pattern déjà abandonné pour les frames RDP au profit d'un
+   `tauri::ipc::Channel` binaire zéro-copie (voir la section RDP plus haut,
+   « Optimisation supplémentaire : `tauri::ipc::Channel` pour `Image` »),
+   pour la même raison de coût fixe par message. C'est probablement
+   l'évènement le plus fréquent de toute l'app (chaque octet de sortie
+   terminal, potentiellement plusieurs fois par seconde sous sortie
+   verbeuse), donc le gain le plus tangible des trois — mais aussi le
+   chantier le plus invasif : touche le chemin le plus exercé de l'app
+   (SSH, Docker exec, terminal local, potentiellement le mode diffusion
+   multi-terminaux), donc plus de surface à casser et plus de test réel
+   nécessaire avant de le considérer fiable.
+
+## Relicenciement MIT + renommage en Guiterm (2026-07-16)
+
+Décision utilisateur : viser une stratégie open-core pour la visibilité du
+projet (voir la mémoire long-terme de Claude, fichier
+`gui-termius-open-core-strategy.md`, pour l'historique complet de la
+discussion). Deux chantiers effectués le même jour :
+
+**Relicenciement PolyForm Noncommercial → MIT.** Choix fait par Claude sans
+repasser par l'utilisateur (jugé à faible risque : rien n'était encore
+distribué publiquement sous l'ancienne licence). Fichiers modifiés :
+`LICENSE` (texte MIT standard), `package.json`, `Cargo.toml` racine
+(`workspace.package.license`), `rdp-ipc/Cargo.toml`, `rdp-sidecar/Cargo.toml`
+(workspace séparé, licence dupliquée à la main — ne suit pas
+`workspace.package`).
+
+**Renommage `gui-termius` → `Guiterm`.** Motivé par un vrai risque de marque :
+l'ancien nom référençait directement Termius, un produit commercial existant.
+L'utilisateur voulait garder le "G"/"gui" ; "Guiterm" retenu après un tour de
+propositions (Gantry, Garrison, Gulliver, Ganglion, Guiterm... — voir la
+mémoire long-terme pour la liste complète).
+
+**Ce qui a été renommé** (tout ce qui est visible de l'extérieur ou tourné
+vers la marque) : `package.json`/`Cargo.toml` (nom du package + binaire
+`src-tauri`, désormais `guiterm`), `tauri.conf.json` (`productName`, titre de
+fenêtre — **pas** `identifier`, voir plus bas), `index.html`, le texte affiché
+dans `TitleBar.tsx`, le nom de release CI (`release.yml`), le nom de fichier
+par défaut à l'export (`SettingsPanel.tsx`), le `client_name` envoyé au
+serveur RDP (`rdp-sidecar/src/main.rs`), plusieurs chaînes cosmétiques
+(messages de panique, préfixes de fichiers temporaires, commentaires), et
+toute la prose de `README.md`/`CONTRIBUTING.md`/`docs/blog/*.md`.
+
+**Ce qui n'a délibérément PAS été renommé, et ne doit pas l'être sans y
+réfléchir à deux fois** :
+- **`core/src/vault.rs`** : `const SERVICE: &str = "gui-termius";` — nom de
+  service utilisé pour *chaque* secret stocké dans le trousseau OS
+  (Credential Manager Windows). Le renommer orphelinerait silencieusement
+  tous les mots de passe/passphrases déjà enregistrés par l'utilisateur sur
+  sa machine réelle.
+- **`core/src/{known_hosts,store,command_history,fleet_history}.rs`** :
+  `ProjectDirs::from("dev", "gui-termius", "gui-termius")` (5 occurrences) —
+  détermine le dossier de config réel
+  (`%APPDATA%\gui-termius\gui-termius\config\` sous Windows). Le renommer
+  ferait démarrer l'app sur un dossier vide au prochain lancement : hôtes,
+  `known_hosts`, historique de commandes et de flotte tous "perdus" (en
+  réalité toujours sur disque sous l'ancien chemin, juste plus lus).
+- **`src/lib/preferences.ts`** (`STORAGE_KEY = "gui-termius-prefs"`) et
+  **`src/lib/tabPersistence.ts`** (`STORAGE_KEY = "gui-termius-tabs"`) — clés
+  `localStorage` de la webview. Même piège que documenté plus haut dans ce
+  fichier (« Préférences = `localStorage` de la webview, pas un fichier ») :
+  les renommer réinitialiserait silencieusement thème/raccourcis/onglets
+  restaurés de l'utilisateur au prochain lancement.
+- **Le crate Rust `termius-core`** (`core/Cargo.toml`, tous les
+  `use termius_core::...`) — laissé tel quel : risque de marque quasi nul
+  (invisible en dehors du code source), et le renommer aurait touché ~20
+  fichiers Rust pour un bénéfice cosmétique interne. Reste un nettoyage
+  possible plus tard si quelqu'un s'y attelle, pas une priorité.
+- **`tauri.conf.json`'s `identifier`** (`"dev.guitermius.app"`) — c'est
+  l'identifiant de bundle utilisé par l'installeur pour détecter une mise à
+  jour d'une installation existante (code de mise à niveau MSI, etc.) ;
+  déjà sans trait d'union (curieusement déjà "guitermius" et pas
+  "gui-termius") et laissé identique pour ne pas casser la continuité de
+  mise à jour d'une install déjà en place.
+- **Le fichier `gui-termius Prototype Connexions (standalone).html`** à la
+  racine — maquette statique de design, pas branchée sur le build réel, non
+  renommée.
+
+**Reste à faire, hors de portée d'un agent (actions sur le compte GitHub de
+l'utilisateur, ou décisions produit)** :
+- Renommer le dépôt GitHub lui-même (`GulliGulli28/gui-termius` →
+  `GulliGulli28/guiterm`, Settings → repository name). Tant que ce n'est pas
+  fait, les URLs déjà mises à jour dans `tauri.conf.json` (endpoint de
+  l'updater) et les badges/liens de `README.md` pointent vers un slug qui
+  n'existe pas encore — à faire avant la prochaine release, sous peine
+  d'updater cassé (404) pour les futurs installs construits depuis ce code.
+  Après le renommage GitHub, mettre à jour le remote local
+  (`git remote set-url origin ...`).
+- Régénérer `Cargo.lock`/`package-lock.json` après le renommage de package
+  (`cargo build --workspace`, `npm install`) — pas fait automatiquement par
+  une simple édition de `Cargo.toml`/`package.json`.
 
 ## Habitudes de collaboration sur ce projet
 

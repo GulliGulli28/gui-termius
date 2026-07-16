@@ -1,11 +1,11 @@
 [package]
-name = "gui-termius"
+name = "guiterm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "gui-termius"
+name = "guiterm"
 path = "src/main.rs"
 
 [build-dependencies]

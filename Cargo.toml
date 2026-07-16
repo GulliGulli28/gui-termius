@@ -13,9 +13,9 @@ members = ["core", "src-tauri", "rdp-ipc"]
 # processus RDP séparé" section.
 
 [workspace.package]
-version = "2.0.1"
+version = "2.1.0"
 edition = "2024"
-license = "PolyForm-Noncommercial-1.0.0"
+license = "MIT"
 
 [workspace.dependencies]
 termius-core = { path = "core" }
@@ -31,9 +31,7 @@ serde_json = "1"
 keyring = "4"
 directories = "6"
 anyhow = "1"
-thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
-rand = "0.10"
 zeroize = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"

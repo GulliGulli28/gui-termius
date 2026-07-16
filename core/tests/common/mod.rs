@@ -15,7 +15,7 @@ pub struct TestSshd {
 impl TestSshd {
     pub fn start(name: &str, client_pubkey_path: &Path) -> Self {
         let dir =
-            std::env::temp_dir().join(format!("gui-termius-test-{name}-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("guiterm-test-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let host_key = dir.join("host_key");
@@ -101,7 +101,7 @@ pub struct ClientKey {
 impl ClientKey {
     pub fn generate() -> Self {
         let dir = std::env::temp_dir().join(format!(
-            "gui-termius-test-clientkey-{}",
+            "guiterm-test-clientkey-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).unwrap();

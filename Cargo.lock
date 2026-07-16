@@ -2208,8 +2208,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "gui-termius"
-version = "2.0.1"
+name = "guiterm"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5898,7 +5898,7 @@ dependencies = [
 
 [[package]]
 name = "termius-core"
-version = "2.0.1"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
@@ -5912,14 +5912,12 @@ dependencies = [
  "hyper",
  "hyper-util",
  "keyring",
- "rand",
  "russh",
  "russh-sftp",
  "serde",
  "serde_json",
  "tar",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tower-service",
  "tracing",

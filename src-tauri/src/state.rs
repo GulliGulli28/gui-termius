@@ -79,4 +79,6 @@ pub struct AppState {
     pub local_history: Mutex<Vec<String>>,
     /// Command history for SSH-terminal ghost-text suggestions, shared across all hosts, most recent last.
     pub ssh_history: Mutex<Vec<String>>,
+    /// Past fleet runs (audit trail), newest first — persisted to `fleet_history.json`.
+    pub fleet_history: Mutex<Vec<termius_core::fleet_history::FleetRun>>,
 }

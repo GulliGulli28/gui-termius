@@ -11,6 +11,7 @@ import { TerminalTab, type TerminalTabHandle } from "./components/TerminalTab";
 import { LocalTerminalTab } from "./components/LocalTerminalTab";
 import { TransferTab } from "./components/TransferTab";
 import { RdpTab } from "./components/RdpTab";
+import { FleetTab } from "./components/FleetTab";
 import { TitleBar } from "./components/TitleBar";
 import { type AppPreferences, type UiAccent, ACCENT_COLORS, BG_THEMES, loadPreferences, savePreferences } from "./lib/preferences";
 import { SplitPane } from "./components/SplitPane";
@@ -282,6 +283,12 @@ export default function App() {
     setActiveTabId(id);
   }, [preferences.defaultLocalShell]);
 
+  const openFleet = useCallback(() => {
+    const id = `tab-${nextTabId++}`;
+    setTabs((prev) => [...prev, { id, kind: "fleet", label: "Opérations de flotte" }]);
+    setActiveTabId(id);
+  }, []);
+
   const toggleSplit = useCallback(() => setSplitOpen((v) => !v), []);
 
   const reconnectTab = useCallback((id: string) => {
@@ -485,6 +492,11 @@ export default function App() {
       label: "Exporter le scrollback du terminal actif…",
       run: () => { exportActiveScrollback(); },
     },
+    {
+      id: "fleet.open",
+      label: "Opérations de flotte — exécuter sur plusieurs hôtes…",
+      run: () => openFleet(),
+    },
   ] : [];
 
   const vaultUnlockModal = unlockModalOpen && vaultStatus?.enabled ? (
@@ -515,12 +527,12 @@ export default function App() {
 
   const showRightPanel = !!(editingHost || editingGroup);
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  const activeHostId = activeTab && activeTab.kind !== "local-terminal" ? activeTab.hostId : null;
+  const activeHostId = activeTab && activeTab.kind !== "local-terminal" && activeTab.kind !== "fleet" ? activeTab.hostId : null;
 
   // Resolves a tab to its host's group color tag (if the host, its group, and a
   // color are all set), so TabBar can show a small dot without knowing about hosts/groups.
   const tabColor = (tab: TabMeta): string | undefined => {
-    if (tab.kind === "local-terminal") return undefined;
+    if (tab.kind === "local-terminal" || tab.kind === "fleet") return undefined;
     const host = workspace.hosts.find((h) => h.id === tab.hostId);
     const group = host?.groupId ? workspace.groups.find((g) => g.id === host.groupId) : null;
     const accent = group?.color as UiAccent | undefined;
@@ -702,6 +714,13 @@ export default function App() {
                             else terminalRefs.current.delete(tab.id);
                           }}
                         />
+                      </div>
+                    );
+                  }
+                  if (tab.kind === "fleet") {
+                    return (
+                      <div key={tab.id} className={isActive ? "absolute inset-0 flex flex-col" : "hidden"}>
+                        <FleetTab workspace={workspace} onError={reportError} />
                       </div>
                     );
                   }

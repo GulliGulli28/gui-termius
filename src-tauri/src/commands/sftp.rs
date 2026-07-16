@@ -213,17 +213,23 @@ pub async fn pane_rename(
     Ok(PaneListed { cwd, entries })
 }
 
+/// Removes every entry in `entries` from `cwd`, then lists `cwd` once — not
+/// once per entry, which would turn a bulk delete into an O(n²) round-trip
+/// (each SFTP list is a protocol exchange, each Docker-pane list spawns a
+/// fresh `sh` exec in the container).
 #[tauri::command]
 pub async fn pane_remove(
     state: State<'_, AppState>,
     pane_id: String,
     cwd: String,
-    entry: Entry,
+    entries: Vec<Entry>,
 ) -> Result<PaneListed, String> {
     let reference = pane_ref(&state, &pane_id)?;
-    transfer::remove(&reference, &cwd, &entry)
-        .await
-        .map_err(|e| e.to_string())?;
+    for entry in &entries {
+        transfer::remove(&reference, &cwd, entry)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     let entries = transfer::list(&reference, &cwd)
         .await
         .map_err(|e| e.to_string())?;
