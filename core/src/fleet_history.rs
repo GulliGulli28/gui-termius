@@ -4,7 +4,7 @@
 //! `workspace.json`: this is a record of what happened, not configured state —
 //! same reasoning as [`crate::command_history`].
 
-use crate::fleet::HostOutcome;
+use crate::fleet::{FleetTarget, HostOutcome};
 use crate::model::HostId;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ const HISTORY_FILE: &str = "fleet_history.json";
 /// this is much smaller than the command-history cap.
 const MAX_RUNS: usize = 50;
 
-/// One recorded fleet run: the command, its targets, and every host's result.
+/// One recorded fleet run: the command, its targets, and every target's result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FleetRun {
@@ -27,14 +27,150 @@ pub struct FleetRun {
     /// The literal command for a classic run; the natural-language intent
     /// for an adaptive run (see `per_host_commands` for what actually ran).
     pub command: String,
-    pub host_ids: Vec<HostId>,
+    pub targets: Vec<FleetTarget>,
     pub outcomes: Vec<HostOutcome>,
     /// Set only for an adaptive run: the actual per-host command dispatched
     /// (different hosts can run different commands, grouped by platform —
-    /// see `crate::adaptive`). `None` for a classic run, where every host
+    /// see `crate::adaptive`, SSH-only, hence still keyed by `HostId` rather
+    /// than `FleetTarget`). `None` for a classic run, where every target
     /// already ran the same `command`.
     #[serde(default)]
     pub per_host_commands: Option<HashMap<HostId, String>>,
+}
+
+/// Pre-`FleetTarget` on-disk shape (every run was SSH-only) — kept only to
+/// migrate an existing `fleet_history.json` in place when loading; never
+/// written again. `host_ids`/`host_id` were bare host UUIDs.
+mod legacy {
+    use super::*;
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct FleetRun {
+        pub id: Uuid,
+        pub started_at_ms: u64,
+        pub command: String,
+        pub host_ids: Vec<HostId>,
+        pub outcomes: Vec<HostOutcome>,
+        #[serde(default)]
+        pub per_host_commands: Option<HashMap<HostId, String>>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct HostOutcome {
+        pub host_id: HostId,
+        pub exit_code: Option<i32>,
+        pub stdout: String,
+        pub stderr: String,
+        pub duration_ms: u64,
+        pub error: Option<String>,
+    }
+
+    impl From<HostOutcome> for super::HostOutcome {
+        fn from(o: HostOutcome) -> Self {
+            super::HostOutcome {
+                target: FleetTarget::Ssh { host_id: o.host_id },
+                exit_code: o.exit_code,
+                stdout: o.stdout,
+                stderr: o.stderr,
+                duration_ms: o.duration_ms,
+                error: o.error,
+            }
+        }
+    }
+
+    impl From<FleetRun> for super::FleetRun {
+        fn from(r: FleetRun) -> Self {
+            super::FleetRun {
+                id: r.id,
+                started_at_ms: r.started_at_ms,
+                command: r.command,
+                targets: r.host_ids.into_iter().map(|host_id| FleetTarget::Ssh { host_id }).collect(),
+                outcomes: r.outcomes.into_iter().map(Into::into).collect(),
+                per_host_commands: r.per_host_commands,
+            }
+        }
+    }
+}
+
+/// On-disk shape written between `FleetTarget` being introduced and its
+/// `rename_all_fields` fix (see `crate::fleet::FleetTarget`'s doc comment):
+/// `targets`/`outcomes[].target` already had the right `"kind"` tag, but
+/// `host_id`/`container_id` inside each variant were still snake_case on
+/// the wire — `rename_all` on an internally-tagged enum only renames the
+/// tag's *values*, never struct-variant field names. Kept only to migrate
+/// an existing `fleet_history.json` written during that window; never
+/// written again.
+mod legacy_snake_case_target {
+    use super::*;
+
+    #[derive(Deserialize)]
+    #[serde(tag = "kind", rename_all = "camelCase")]
+    pub enum FleetTarget {
+        Ssh { host_id: HostId },
+        Docker { host_id: HostId, container_id: String },
+        Local,
+    }
+
+    impl From<FleetTarget> for super::FleetTarget {
+        fn from(t: FleetTarget) -> Self {
+            match t {
+                FleetTarget::Ssh { host_id } => super::FleetTarget::Ssh { host_id },
+                FleetTarget::Docker { host_id, container_id } => super::FleetTarget::Docker { host_id, container_id },
+                FleetTarget::Local => super::FleetTarget::Local,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct HostOutcome {
+        pub target: FleetTarget,
+        pub exit_code: Option<i32>,
+        pub stdout: String,
+        pub stderr: String,
+        pub duration_ms: u64,
+        pub error: Option<String>,
+    }
+
+    impl From<HostOutcome> for super::HostOutcome {
+        fn from(o: HostOutcome) -> Self {
+            super::HostOutcome {
+                target: o.target.into(),
+                exit_code: o.exit_code,
+                stdout: o.stdout,
+                stderr: o.stderr,
+                duration_ms: o.duration_ms,
+                error: o.error,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct FleetRun {
+        pub id: Uuid,
+        pub started_at_ms: u64,
+        pub command: String,
+        pub targets: Vec<FleetTarget>,
+        pub outcomes: Vec<HostOutcome>,
+        #[serde(default)]
+        pub per_host_commands: Option<HashMap<HostId, String>>,
+    }
+
+    impl From<FleetRun> for super::FleetRun {
+        fn from(r: FleetRun) -> Self {
+            super::FleetRun {
+                id: r.id,
+                started_at_ms: r.started_at_ms,
+                command: r.command,
+                targets: r.targets.into_iter().map(Into::into).collect(),
+                outcomes: r.outcomes.into_iter().map(Into::into).collect(),
+                per_host_commands: r.per_host_commands,
+            }
+        }
+    }
 }
 
 fn history_path() -> anyhow::Result<PathBuf> {
@@ -51,12 +187,27 @@ pub fn save(history: &[FleetRun]) -> anyhow::Result<()> {
     save_to(&history_path()?, history)
 }
 
+/// Tries the current shape first, then each progressively older on-disk
+/// shape in turn — [`legacy_snake_case_target::FleetRun`] (`FleetTarget`
+/// existed but its fields were still snake_case on the wire), then
+/// [`legacy::FleetRun`] (before `FleetTarget` existed at all, bare
+/// `hostIds`/`hostId` UUIDs). Each failure is a missing-field error, not
+/// data corruption, so falling through is safe. The file itself is only
+/// rewritten in the current shape the next time a run is recorded — same
+/// one-way, load-time migration pattern as `store::resilient_load`.
 fn load_from(path: &Path) -> anyhow::Result<Vec<FleetRun>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
     let raw = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&raw)?)
+    if let Ok(runs) = serde_json::from_str::<Vec<FleetRun>>(&raw) {
+        return Ok(runs);
+    }
+    if let Ok(runs) = serde_json::from_str::<Vec<legacy_snake_case_target::FleetRun>>(&raw) {
+        return Ok(runs.into_iter().map(Into::into).collect());
+    }
+    let legacy_runs: Vec<legacy::FleetRun> = serde_json::from_str(&raw)?;
+    Ok(legacy_runs.into_iter().map(Into::into).collect())
 }
 
 fn save_to(path: &Path, history: &[FleetRun]) -> anyhow::Result<()> {
@@ -84,7 +235,7 @@ mod tests {
             id: Uuid::new_v4(),
             started_at_ms: 1_700_000_000_000,
             command: command.to_string(),
-            host_ids: vec![Uuid::new_v4()],
+            targets: vec![FleetTarget::Ssh { host_id: Uuid::new_v4() }],
             outcomes: Vec::new(),
             per_host_commands: None,
         }
@@ -126,5 +277,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let history = load_from(&dir.path().join("nope.json")).unwrap();
         assert!(history.is_empty());
+    }
+
+    #[test]
+    fn load_migrates_a_snake_case_target_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet_history.json");
+        let host_id = Uuid::new_v4();
+        let snake_case_json = format!(
+            r#"[{{"id":"{}","startedAtMs":1700000000000,"command":"uptime","targets":[{{"kind":"ssh","host_id":"{host_id}"}}],"outcomes":[{{"target":{{"kind":"ssh","host_id":"{host_id}"}},"exitCode":0,"stdout":"up 1 day","stderr":"","durationMs":42,"error":null}}]}}]"#,
+            Uuid::new_v4(),
+        );
+        std::fs::write(&path, snake_case_json).unwrap();
+
+        let history = load_from(&path).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].targets, vec![FleetTarget::Ssh { host_id }]);
+        assert_eq!(history[0].outcomes[0].target, FleetTarget::Ssh { host_id });
+        assert_eq!(history[0].outcomes[0].stdout, "up 1 day");
+    }
+
+    #[test]
+    fn load_migrates_a_pre_targets_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet_history.json");
+        let host_id = Uuid::new_v4();
+        let legacy_json = format!(
+            r#"[{{"id":"{}","startedAtMs":1700000000000,"command":"uptime","hostIds":["{host_id}"],"outcomes":[{{"hostId":"{host_id}","exitCode":0,"stdout":"up 1 day","stderr":"","durationMs":42,"error":null}}]}}]"#,
+            Uuid::new_v4(),
+        );
+        std::fs::write(&path, legacy_json).unwrap();
+
+        let history = load_from(&path).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].targets, vec![FleetTarget::Ssh { host_id }]);
+        assert_eq!(history[0].outcomes.len(), 1);
+        assert_eq!(history[0].outcomes[0].target, FleetTarget::Ssh { host_id });
+        assert_eq!(history[0].outcomes[0].stdout, "up 1 day");
     }
 }

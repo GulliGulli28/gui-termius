@@ -4,6 +4,7 @@
 //! tunnelled over an existing SSH connection ([`connect_via_ssh`]) when a
 //! bastion is needed. Mirrors `docker exec` itself rather than `ssh` +
 //! `docker exec`.
+use crate::model::HostFacts;
 use crate::ssh::{Connection, ShellInput, ShellSession};
 use bollard::Docker;
 use bollard::container::LogOutput;
@@ -315,20 +316,18 @@ pub async fn open_exec(
 /// Runs `cmd` inside `container_id` to completion — non-interactive, no PTY
 /// (`tty: false`, unlike [`open_exec`]) — writes `stdin` if given (shutting
 /// its write half down afterward so the remote command sees EOF, needed for
-/// anything reading until end-of-input), and returns captured stdout.
-/// Errors on a non-zero exit code, with stderr folded into the message —
-/// used by `crate::docker_pane` for the shell-based Docker pane operations
-/// (listing, mkdir, rename, remove, chmod) that have no Engine API
-/// equivalent. `cmd`'s arguments are passed as a real argv array (never
-/// string-interpolated into a shell command line), so callers building a
-/// `sh -c '<script>' sh "$1" "$2" ...` invocation can hand untrusted path
-/// segments through positional parameters without any escaping of their own.
-pub(crate) async fn exec_capture(
+/// anything reading until end-of-input), and returns the exit code plus
+/// captured stdout/stderr, whatever they are. Shared by [`exec_capture`]
+/// (bails on a non-zero exit — the right policy for its file-op callers,
+/// where that always means something went wrong) and [`exec_with_exit_code`]
+/// (reports it instead — the right policy for the fleet executor, where a
+/// non-zero exit is a normal, reportable outcome).
+async fn exec_raw(
     docker: &Docker,
     container_id: &str,
     cmd: Vec<String>,
     stdin: Option<Vec<u8>>,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<(Option<i64>, Vec<u8>, Vec<u8>)> {
     let exec = docker
         .create_exec(
             container_id,
@@ -368,15 +367,63 @@ pub(crate) async fn exec_capture(
     }
 
     let inspect = docker.inspect_exec(&exec).await?;
-    if inspect.exit_code != Some(0) {
+    Ok((inspect.exit_code, stdout, stderr))
+}
+
+/// Errors on a non-zero exit code, with stderr folded into the message —
+/// used by `crate::docker_pane` for the shell-based Docker pane operations
+/// (listing, mkdir, rename, remove, chmod) that have no Engine API
+/// equivalent. `cmd`'s arguments are passed as a real argv array (never
+/// string-interpolated into a shell command line), so callers building a
+/// `sh -c '<script>' sh "$1" "$2" ...` invocation can hand untrusted path
+/// segments through positional parameters without any escaping of their own.
+pub(crate) async fn exec_capture(
+    docker: &Docker,
+    container_id: &str,
+    cmd: Vec<String>,
+    stdin: Option<Vec<u8>>,
+) -> anyhow::Result<Vec<u8>> {
+    let (exit_code, stdout, stderr) = exec_raw(docker, container_id, cmd, stdin).await?;
+    if exit_code != Some(0) {
         let detail = String::from_utf8_lossy(&stderr).trim().to_string();
         anyhow::bail!(
             "commande distante en échec (code {:?}){}",
-            inspect.exit_code,
+            exit_code,
             if detail.is_empty() { String::new() } else { format!(" : {detail}") }
         );
     }
     Ok(stdout)
+}
+
+/// Like [`exec_capture`], but never bails on a non-zero exit — returns it
+/// instead, the same "ran but failed" vs. "couldn't run at all" distinction
+/// `fleet::run_on_hosts` already makes for SSH (`ssh::run_command_capture`).
+/// Used by `fleet::execute`'s Docker exec target.
+pub async fn exec_with_exit_code(
+    docker: &Docker,
+    container_id: &str,
+    cmd: Vec<String>,
+) -> anyhow::Result<(Option<i32>, String, String)> {
+    let (exit_code, stdout, stderr) = exec_raw(docker, container_id, cmd, None).await?;
+    Ok((
+        exit_code.map(|c| c as i32),
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    ))
+}
+
+/// Probes `container_id` for the same facts SSH/local terminals collect —
+/// used by the adaptive snippet engine to translate a DSL program for a
+/// Docker exec terminal. Reuses [`exec_capture`] (already the primitive
+/// `docker_pane`'s file operations run over) with `crate::facts::PROBE`
+/// rather than adding a second way to run a one-off command in a container.
+/// `None` on any failure (unreachable daemon, no shell in the container,
+/// non-zero exit) — collapses to "facts unknown", same as an unreachable
+/// SSH host.
+pub async fn probe_container_facts(docker: &Docker, container_id: &str) -> Option<HostFacts> {
+    let cmd = vec!["sh".to_string(), "-c".to_string(), crate::facts::PROBE.to_string()];
+    let stdout = exec_capture(docker, container_id, cmd, None).await.ok()?;
+    Some(crate::facts::parse_facts(&String::from_utf8_lossy(&stdout)))
 }
 
 #[cfg(test)]

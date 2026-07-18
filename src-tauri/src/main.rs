@@ -76,6 +76,8 @@ fn main() {
             commands::facts::collect_facts,
             commands::adaptive::generate_adaptive_program,
             commands::adaptive::preview_adaptive_program,
+            commands::adaptive::compose_adaptive_for_local,
+            commands::adaptive::compose_adaptive_for_docker,
             commands::adaptive::run_adaptive_plan,
             commands::adaptive::save_adaptive_snippet,
             commands::adaptive::set_anthropic_api_key,

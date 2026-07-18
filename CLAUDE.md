@@ -1667,8 +1667,9 @@ Features majeures retenues, dans l'ordre de priorité restant :
    onglet `FleetTab.tsx`, ouvrable via un bouton dédié dans la barre
    d'onglets), avec état système collecté et persisté par hôte (`HostFacts`
    sur `Host`) et filtres de sélection (RAM/CPU/charge/uptime/OS). Par-dessus :
-   un petit langage textuel (conditions `target os:`/`target ram: > N`,
-   option `sudo`, huit opérations d'infra courantes) qu'on peut écrire à la
+   un petit langage textuel (conditions `target os:`/`target name:`/
+   `target tag:`/`target ram: > N`, option `sudo`, dix-sept opérations
+   d'infra courantes) qu'on peut écrire à la
    main ou faire rédiger/étendre par une IA à partir d'une instruction en
    français — l'IA n'écrit jamais de shell directement, seulement du texte
    dans cette grammaire, validé par le même parseur que la saisie manuelle
@@ -2002,9 +2003,10 @@ target ram: > 80
 restart-service nginx
 ```
 
-- `target <champ>: <valeur>` — `champ` ∈ {os, ram, cpu, load, uptime}. Pour
-  `os`, texte libre comparé en sous-chaîne insensible à la casse contre
-  `os_id`/`os_name`. Pour les champs numériques, un opérateur optionnel
+- `target <champ>: <valeur>` — `champ` ∈ {os, name, tag, ram, cpu, load,
+  uptime} (`name`/`tag` ajoutés le 2026-07-17, voir plus loin dans ce
+  fichier). Pour `os`, texte libre comparé en sous-chaîne insensible à la
+  casse contre `os_id`/`os_name`. Pour les champs numériques, un opérateur optionnel
   (`>`, `>=`, `<`, `<=`, `=`, défaut `=`) puis un nombre — `uptime` est en
   jours. Plusieurs `target` peuvent se combiner sur une même ligne avec
   `&&` (ET) / `||` (OU) — `&&` prioritaire sur `||`, comme dans la plupart
@@ -2013,11 +2015,17 @@ restart-service nginx
   quel que soit le contenu de chaque ligne ; un bloc sans aucun `target`
   s'applique à tous les hôtes.
 - `sudo: true` (ou juste `sudo`) — préfixe la commande de ce bloc avec `sudo `.
-- La ligne de commande nomme une des huit fonctions connues —
+- La ligne de commande nomme une des fonctions connues — à l'origine huit :
   `install-package`, `remove-package`, `update-packages`, `start-service`,
   `stop-service`, `restart-service`, `enable-service`, `disable-service` —
-  avec un argument (nom de paquet/service) pour toutes sauf
-  `update-packages`.
+  et neuf de plus depuis (`service-logs`, `create-directory`/
+  `remove-directory`, `create-user`/`remove-user`, `reboot`,
+  `set-hostname`, `open-port`/`close-port` ; voir la section « Moteur
+  adaptatif : filtres `target name`/`target tag`, nouvelles opérations »
+  plus loin dans ce fichier, et le doc-comment de `core/src/adaptive.rs`
+  pour la liste et la grammaire à jour) — avec un argument (nom de paquet/
+  service, chemin, nom d'utilisateur/hôte, ou port selon la fonction) pour
+  toutes sauf `update-packages` et `reboot`.
 
 **Évaluation par hôte** (`compose_for_host`) : chaque bloc dont les
 conditions correspondent à l'hôte contribue sa commande rendue ; toutes les
@@ -2081,6 +2089,105 @@ opérateur en trop — 27 existaient déjà avant cet ajout), `cargo clippy
 (aucun changement frontend au-delà de l'aide-mémoire — l'évaluation reste
 entièrement côté Rust, `preview_adaptive_program` inchangé dans sa
 signature).
+
+**Extension à Docker exec, terminal local, et une vraie plateforme Windows
+(2026-07-16, plus tard le même jour).** Jusque-là le moteur adaptatif ne
+savait traduire que pour un hôte SSH (facts collectées via la sonde
+POSIX de `facts::collect`, qui `bail!` explicitement pour Docker exec/RDP/
+K8s — voir `fleet::execute`). Demande utilisateur : pouvoir aussi exécuter
+un snippet adaptatif, traduit, sur un terminal local ou un onglet Docker
+exec — pas juste SSH. Décision actée avec l'utilisateur avant tout code
+(`AskUserQuestion`, vrai fork de conception) : sur Windows, le terminal
+local par défaut lance PowerShell (pas un shell POSIX — vérifié en lisant
+`open_local_terminal`, `src-tauri/src/commands/terminal.rs`), et la table de
+rendu ne connaissait que Linux ; l'utilisateur a choisi le support Windows
+complet plutôt que de se limiter aux terminaux locaux déjà sous un shell
+POSIX (WSL) — argument en sa faveur : contrairement à SSH/RDP, cette
+plateforme Windows est *directement testable en conditions réelles* sur la
+machine de dev elle-même, pas seulement en aveugle.
+
+- **Docker exec** : le blocage n'était qu'architectural, pas technique —
+  `exec_capture` (`core/src/docker.rs`, déjà utilisé par `docker_pane.rs`
+  pour les opérations fichier) permet déjà de lancer une commande
+  arbitraire dans un conteneur précis et d'en capturer stdout/code de
+  sortie, exactement comme `ssh::run_command_capture` pour SSH. Nouveau
+  `docker::probe_container_facts(docker, container_id)` : lance
+  `facts::PROBE` (rendu `pub(crate)`, avant privé au module) via
+  `exec_capture`, parse avec `facts::parse_facts` — aucune nouvelle logique
+  de sonde, juste un nouveau transport. **Pas de cache de facts pour
+  Docker** (contrairement à `Host.lastFacts` pour SSH) : un `Host`
+  `dockerExec` n'est pas lié à un conteneur précis (le conteneur se choisit
+  à l'ouverture de l'onglet, voir `HostKind::DockerExec`'s doc comment) —
+  stocker une seule snapshot de facts par `Host` mélangerait les OS de
+  plusieurs conteneurs différents. Sondé à chaque exécution à la place :
+  un aller-retour `exec` de plus par exécution de snippet, négligeable.
+- **Terminal local** : `core/src/local_shell.rs` (nouveau) centralise la
+  résolution "quel shell tourne réellement dans cet onglet" — extrait
+  de `open_local_terminal` (qui l'appelle maintenant aussi, pour ne pas
+  dupliquer la logique de défaut) — et `is_windows_native_shell` (détecte
+  PowerShell/cmd/pwsh par nom de base, insensible à la casse). Un shell
+  natif Windows ne passe **jamais** par une sonde : la plateforme est
+  synthétisée directement (`HostFacts { os_id: Some("windows"), .. }`),
+  connue instantanément puisque c'est l'OS sur lequel Guiterm tourne
+  lui-même — pas de round-trip nécessaire, contrairement à un hôte distant
+  dont l'OS est par nature inconnu tant qu'on ne l'a pas sondé. Tout autre
+  shell (WSL, un vrai `sh`/`bash`, Git Bash) passe par
+  `facts::probe_local(shell)` (nouveau) — lance `PROBE` comme process local
+  ponctuel non-interactif (jamais le pty interactif déjà ouvert, qui
+  affiche déjà un prompt — l'interférence corromprait l'affichage), avec un
+  cas particulier pour `wsl.exe` (`wsl.exe -e sh -c "<PROBE>"`, sinon
+  `wsl.exe` ne comprend pas `-c` directement). **Élégance trouvée en
+  cours de route** : Git Bash n'a pas de vrai `/etc/os-release` (pas de
+  vraie distro Linux dessous) — pas besoin de le détecter spécifiquement
+  comme cas à part, la sonde y échoue juste silencieusement (`os_id` reste
+  `None`), donnant `platform_key: "unknown"` et le message « non pris en
+  charge » déjà existant pour toute plateforme non couverte — aucune
+  branche de code supplémentaire nécessaire pour ce cas.
+- **Plateforme Windows dans `render_command`** : nouvelle famille de
+  gestionnaire de paquets `"winget"` (`install`/`remove` via
+  `winget install|uninstall <nom>`, `update-packages` via
+  `winget upgrade --all`) et nouvelle famille de service `"pwsh-service"`
+  (cmdlets PowerShell : `Start-Service`/`Stop-Service`/`Restart-Service`/
+  `Set-Service -StartupType Automatic|Disabled`) — même principe que les
+  familles POSIX existantes (`is_safe_token` inchangé, protège aussi ces
+  nouvelles commandes). **Piège trouvé en écrivant les tests** : deux tests
+  existants (`unsupported_platform_returns_none`,
+  `compose_notes_an_unsupported_platform_for_a_matching_block`)
+  utilisaient `"windows"` comme exemple *volontairement non supporté* —
+  cassés dès l'ajout de la vraie plateforme Windows (`render_command`
+  renvoyait maintenant `Some(...)` au lieu de `None` attendu). Corrigés en
+  remplaçant par `"freebsd"`, une plateforme réellement non couverte —
+  sans quoi `cargo test` aurait échoué silencieusement pour la mauvaise
+  raison (pas un bug du nouveau code, juste un exemple de test devenu
+  obsolète).
+- **Nouvelles commandes Tauri** (`commands/adaptive.rs`) :
+  `compose_adaptive_for_local(program_text, shell)` et
+  `compose_adaptive_for_docker(program_text, host_id, container_id)` —
+  contrairement à `preview_adaptive_program` (groupe plusieurs hôtes via
+  `Workspace`), celles-ci ciblent toujours une seule cible et renvoient
+  directement `ComposeResult` (nouvellement `Serialize`) plutôt qu'un
+  `Vec<ExecutionGroup>` — pas de `Workspace`/`host_id` nécessaire pour le
+  terminal local, qui n'a pas de `Host` du tout. `App.tsx::runAdaptiveSnippet`
+  classe chaque cible (terminal local / hôte SSH / conteneur Docker exec /
+  autre → erreur explicite) avant de router vers le bon chemin ; les cibles
+  SSH restent groupées par lot via `previewAdaptiveProgram` comme avant, les
+  cibles Docker/local sont traduites une par une (pas de lot existant pour
+  elles, complexité inutile pour ce volume).
+- **Vérifié** : `cargo test -p termius-core` (105 tests unitaires — dont les
+  nouveaux `local_shell::tests` et `facts::tests::probe_local_*`, ce dernier
+  exerçant un **vrai process local** via `sh` sous WSL, pas une supposition
+  — plus les tests d'intégration réels avec `sshd`), `cargo clippy
+  --workspace --all-targets -- -D warnings` propre, `npx tsc --noEmit`
+  propre. **Non vérifié** : une vraie commande `winget`/cmdlet PowerShell
+  exécutée pour de vrai depuis un terminal local Windows, ou un vrai
+  conteneur Docker sondé — contrairement à SSH/RDP, le premier cas est
+  réellement testable sur cette machine (Windows natif, winget déjà utilisé
+  ailleurs dans ce projet) mais volontairement pas exécuté par l'agent
+  lui-même (installerait/modifierait quelque chose pour de vrai sur la
+  machine de l'utilisateur sans demande explicite en ce sens) — à tester
+  par l'utilisateur. Le second (Docker) reste bloqué par la même limitation
+  que le reste du support Docker exec de ce projet (aucun démon joignable
+  dans cet environnement WSL).
 
 ### Ce qui a été essayé puis abandonné le même jour
 
@@ -2162,6 +2269,498 @@ exercés pour de vrai. Le chemin manuel (écrire `install-package nginx` à la
 main dans Opérations de flotte, Prévisualiser, Exécuter) est le seul
 testable sans clé API et devrait être la première chose validée en
 conditions réelles, avant `generate_program` lui-même.
+
+## Opérations de flotte : cibles unifiées (SSH + Docker exec + terminal local) (2026-07-16)
+
+Demande utilisateur, suite directe de l'extension du moteur adaptatif à
+Docker exec/terminal local (section précédente) : pouvoir aussi les
+sélectionner comme **cibles de flotte** (mode « Commande », pas seulement
+l'exécution ponctuelle sur un terminal). Décision actée avec l'utilisateur
+avant tout code (`AskUserQuestion`, vrai fork d'ampleur) : intégration
+complète, avec conservation dans l'Historique persistant — plutôt qu'une
+version plus petite où ces cibles n'auraient vécu que le temps du run en
+cours. Choix assumé comme le plus gros des deux, engagé en connaissance de
+cause.
+
+**Pourquoi c'était un vrai chantier, pas une extension mineure** : tout le
+sous-système flotte (`core/src/fleet.rs`, `fleet_history.rs`,
+`commands/fleet.rs`) était bâti sur `HostId` (`Uuid` strict, pas une simple
+`String`) comme unique identifiant de cible — `HostOutcome.host_id`,
+`FleetRun.host_ids`, `commands: HashMap<HostId, String>`. Un conteneur
+Docker n'est pas un `Host` (voir `HostKind::DockerExec`'s doc comment) et
+« le terminal local » n'en est pas un non plus — aucun des deux n'a
+d'`Uuid` à donner. Introduire un identifiant plus riche était donc
+incontournable, pas une histoire de branchement UI.
+
+**`core::fleet::FleetTarget`** (nouvel enum, `Ssh { host_id } | Docker {
+host_id, container_id } | Local`) remplace `HostId` partout dans ce
+sous-système : `HostOutcome.target`, `run_on_hosts`/`uniform_commands`
+prennent/retournent `HashMap<FleetTarget, String>`, `execute()` bascule sur
+un match à 3 branches (SSH inchangé ; Docker via
+`docker::exec_with_exit_code`, nouveau — voir plus bas ; Local via
+`local_shell::run_capture`, nouveau aussi). **Portée volontairement limitée**
+au mode « Commande » (texte littéral) : le mode « Langage » (DSL adaptatif)
+reste strictement SSH-only comme avant — `adaptive::preview`/
+`ExecutionGroup`/`GroupCommand` gardent `Vec<HostId>` intact, aucun
+changement là-dedans. `commands::adaptive::run_adaptive_plan` enveloppe
+juste ses `HostId` en `FleetTarget::Ssh` au moment d'appeler
+`execute_and_record` (désormais `HashMap<FleetTarget, String>`), sans
+toucher au reste de sa logique.
+
+- **`docker::exec_with_exit_code`** (nouveau, à côté d'`exec_capture`
+  existant) : `exec_capture` **bail!** sur un code de sortie non nul (la
+  bonne politique pour ses appelants `docker_pane` — un `mkdir`/`ls` qui
+  échoue est une vraie erreur) — mauvaise politique pour la flotte, où un
+  code non nul est un résultat normal et affichable, pas une erreur de
+  connexion (même distinction que `ssh::run_command_capture` pour SSH).
+  Facteur commun `exec_raw` extrait pour partager la plomberie `create_exec`/
+  `start_exec`/collecte stdout-stderr/`inspect_exec` sans dupliquer, les
+  deux fonctions publiques n'ajoutant que leur politique respective par-dessus.
+- **`local_shell::run_capture`** (nouveau) + **`one_shot_command`** (extrait
+  de `probe_local`, maintenant partagé) : `probe_local` ne gérait le
+  découpage `-c` que pour un shell POSIX générique ou `wsl.exe` — jamais
+  pour PowerShell/cmd directement (toujours filtré en amont par
+  `is_windows_native_shell` avant d'être appelé). Exécuter du texte tapé à
+  la main en mode « Commande » sur le terminal local, en revanche, doit
+  fonctionner **avec le vrai shell par défaut de l'onglet**, PowerShell y
+  compris — `one_shot_command` route donc explicitement par famille :
+  `wsl.exe` → `-e sh -c`, `cmd.exe` → `/c`, PowerShell/pwsh → `-Command`,
+  sinon (vrai POSIX) → `-c`. `probe_local` était déjà correct par accident
+  (jamais appelé avec un shell natif Windows) ; `run_capture` avait
+  vraiment besoin de cette distinction pour ne pas planter au premier
+  `install-package` tapé depuis un terminal local PowerShell.
+- **Migration `fleet_history.json`** — le point le plus délicat : un fichier
+  déjà écrit avant ce chantier contient `hostIds`/`hostId` (UUID bruts), pas
+  `targets` (objets `{"kind":"ssh","hostId":"..."}`). `fleet_history::load_from`
+  essaie d'abord le nouveau schéma (`serde_json::from_str::<Vec<FleetRun>>`) ;
+  un fichier pré-migration échoue proprement (champ `targets` requis
+  manquant) et retombe sur un module `legacy` privé (`LegacyFleetRun`/
+  `LegacyHostOutcome`, mêmes noms de champs que l'ancien schéma), converti en
+  mémoire vers le nouveau type (`From<legacy::FleetRun> for FleetRun`) — le
+  fichier n'est réécrit dans le nouveau format qu'au prochain run enregistré,
+  même pattern de migration paresseuse, au chargement, que
+  `store::resilient_load` pour `workspace.json`. Testé explicitement
+  (`load_migrates_a_pre_targets_file`, construit un JSON à la main dans
+  l'ancien format et vérifie la conversion) — un roundtrip Rust→Rust
+  n'aurait rien prouvé ici, même raison que pour les autres pièges
+  `camelCase` déjà rencontrés dans ce projet.
+- **Frontend (`FleetTab.tsx`)** : `FleetTarget` n'a pas d'existence comme clé
+  React (Set/Map ont besoin d'un primitif, pas d'un objet structurel) —
+  nouveau `fleetTargetKey()` (`src/lib/types.ts`) produit une string stable
+  (`ssh:<uuid>`, `docker:<hostId>:<containerId>`, `"local"`) utilisée partout
+  où `selected`/`results`/`pending`/`expanded` indexaient auparavant par
+  `HostId` brut. Nouvelle liste unifiée `allTargets` : un item fixe
+  « Terminal local » toujours présent, un item par hôte SSH (état/RAM
+  affichés comme avant), un item par conteneur Docker **en cours
+  d'exécution** (`state === "running"` uniquement — un conteneur arrêté ne
+  peut pas recevoir d'`exec`), listés en direct via `listDockerContainers`
+  par hôte `dockerExec` du workspace (best-effort : un démon injoignable ne
+  contribue simplement aucun conteneur, ne bloque pas le panneau). Le mode
+  « Langage » reste strictement SSH-only : la sélection automatique en
+  direct n'y coche jamais que des clés `ssh:…`, les cases Docker/local
+  restent désactivées et jamais cochées dans ce mode — comportement hérité
+  de la section précédente, pas retouché ici.
+
+**Vérifié** : `cargo test -p termius-core` (108 tests unitaires + 2 tests
+d'intégration `fleet_integration` avec un vrai `sshd`, dont un nouveau test
+de migration), `cargo clippy --workspace --all-targets -- -D warnings`
+propre, `npx tsc --noEmit` propre, `npx vitest run` vert,
+`node scripts/e2e-run.mjs` (smoke WSL/WebKitGTK) au vert. **Non vérifié** :
+un vrai run de flotte contre un conteneur Docker réel (même limitation que
+le reste du support Docker exec de ce projet — aucun démon joignable dans
+cet environnement WSL) ; un run de flotte réel sur « Terminal local » sous
+PowerShell (le rendu `winget`/cmdlets de la section précédente n'avait pas
+non plus été exécuté pour de vrai) — à valider par l'utilisateur.
+
+## Moteur adaptatif : filtres `target name`/`target tag`, nouvelles opérations (2026-07-17)
+
+Deux demandes utilisateur traitées dans la foulée : le terminal local ne
+restaurait pas le bon shell après redémarrage (bug), et le langage adaptatif
+manquait de filtres/opérations (feature).
+
+**Bug restauration de session** : `saveTabs`/`loadTabs`
+(`src/lib/tabPersistence.ts`) ne persistaient pas le champ `shell` d'un
+onglet `local-terminal` — un placeholder restauré retombait donc toujours
+sur `preferences.defaultLocalShell` à la reconnexion, jamais sur le shell
+réellement utilisé (ex. `wsl`). Fix : `shell` ajouté à `PersistedTab`,
+propagé jusqu'au placeholder restauré (`App.tsx`).
+
+**`target name` / `target tag`** (`core/src/adaptive.rs`) : `name` fait une
+correspondance sous-chaîne insensible à la casse sur le nom d'affichage de
+la cible (`label` d'un hôte SSH/Docker, ou nom du shell pour un terminal
+local) ; `tag` fait une correspondance **exacte** (pas sous-chaîne,
+volontairement — un `target tag: prod` ne doit pas matcher `prod-test`) sur
+les tags de l'hôte. A nécessité l'introduction de `HostContext` (facts +
+name + tags) en remplacement de `Option<&HostFacts>` dans tout l'évaluateur,
+puisque `name`/`tag` n'ont pas besoin de facts du tout (un terminal local
+matche `target name` même quand la sonde échoue).
+
+**Neuf nouvelles opérations**, même table de rendu déterministe par
+plateforme + validation de charset que les huit existantes : `service-logs`
+(journalctl/`Get-WinEvent`, best-effort sur Windows — le nom de « provider »
+ne correspond pas toujours au nom du service — non pris en charge sur
+OpenRC/Alpine faute de log centralisé standard), `create-directory`/
+`remove-directory` (chemins entre guillemets simples, charset élargi à
+`/\: ~`), `create-user`/`remove-user` (shadow-utils/BusyBox/Windows),
+`reboot` (sans argument), `set-hostname`, `open-port`/`close-port` (`ufw`/
+`firewalld`/`netsh` — Arch/Alpine volontairement non couverts, pas de
+pare-feu par défaut unifié). Les deux aide-mémoire UI (`FleetTab.tsx`,
+`SnippetsPanel.tsx`) se mettent à jour automatiquement via
+`src/lib/operations.ts`, seul fichier touché côté frontend pour cette partie.
+
+**Vérifié** : 58 tests unitaires `adaptive::tests` (27 avant), `cargo test
+--workspace` (140 tests), `clippy --workspace --all-targets -- -D warnings`,
+`tsc --noEmit`, `vitest run`, `node scripts/e2e-run.mjs`. **Non vérifié** :
+aucune des nouvelles commandes (`useradd`, `ufw`, `netsh`, `journalctl`…)
+n'a tourné pour de vrai contre un hôte — seule la table de rendu
+déterministe est testée unitairement.
+
+## Bug FleetTarget : `rename_all` sur un enum à tag interne ne renomme pas les champs (2026-07-17)
+
+Signalé par l'utilisateur : lancer une commande de flotte fait « mouliner »
+indéfiniment l'onglet « Résultats », alors que l'Historique affiche bien le
+résultat pour chaque hôte ciblé.
+
+**Cause** : `FleetTarget` (`core/src/fleet.rs`, enum à tag interne `#[serde(tag
+= "kind", rename_all = "camelCase")]`, variantes struct `Ssh { host_id }`/
+`Docker { host_id, container_id }`) — même piège déjà documenté trois fois
+dans ce fichier (`rdp_ipc`'s `deltaY`, `PaneSource::Docker`'s `containerId`) :
+`rename_all` sur ce genre d'enum ne renomme que la *valeur* du tag
+(`Ssh` → `"ssh"`), jamais les champs des variantes struct — `host_id`
+restait `host_id` sur le fil, alors que le frontend attend `hostId`.
+Vérifié empiriquement avant tout diagnostic de code (`serde_json::from_str`
+sur un JSON écrit à la main) plutôt que supposé.
+
+**Pourquoi l'exécution réussissait quand même** : l'entrée (frontend →
+backend) passe par `run_adaptive_plan`/`GroupCommand` (struct classique,
+correctement casée) — la run s'exécute donc réellement et se termine.
+Seule la **sortie** est cassée : l'event `fleet-run-outcome` transporte
+`outcome.target` en JSON snake_case, donc `outcome.target.hostId` vaut
+`undefined` côté JS, `fleetTargetKey(outcome.target)` calcule une mauvaise
+clé, et `pending` ne se vide jamais pour la vraie clé — d'où le spinner
+éternel. `fleet_history.json`, lui, est écrit *et* relu uniquement par
+Rust : aucun souci de casse dans ce sens, d'où l'Historique correct (les
+labels d'hôtes y étaient malgré tout vides/faux — passé inaperçu, noyé
+parmi stdout/stderr corrects).
+
+**Fix** : `rename_all_fields = "camelCase"` (serde ≥ 1.0.145) ajouté à
+`FleetTarget`, qui renomme les champs de *toutes* les variantes — vérifié
+empiriquement dans les deux sens avant application. Effet de bord positif :
+le bouton « Charger » d'un run passé (qui filtrait `hostById.has(t.hostId)`)
+gardait silencieusement zéro hôte SSH ; corrigé du même coup.
+
+**Migration `fleet_history.json`** : ce fix change le format sur le disque
+pour tout fichier déjà écrit aujourd'hui (avant le fix) avec la variante
+`FleetTarget`. Nouvelle couche `fleet_history::legacy_snake_case_target`
+(même principe que le module `legacy` existant pour le tout premier schéma
+pré-`targets`) : `load_from` essaie le schéma courant, puis ce schéma
+intermédiaire, puis le plus ancien — l'historique déjà présent sur la
+machine de l'utilisateur n'est jamais perdu.
+
+**Vérifié** : nouveaux tests de régression sur désérialisation d'un JSON
+camelCase écrit à la main (un roundtrip Rust→Rust n'aurait rien prouvé, même
+raison que les trois fois précédentes) + migration du fichier intermédiaire,
+`cargo test --workspace` (134 tests), `clippy --workspace --all-targets --
+-D warnings`, `tsc --noEmit`. Rebuild + relance du binaire Windows natif pour
+test utilisateur réel.
+
+## FleetTab : dépassement de l'aide-mémoire, sélection libre sans `target`, sections redimensionnables (2026-07-17)
+
+Trois retours utilisateur sur `FleetTab.tsx`, traités dans l'ordre où ils
+sont arrivés.
+
+**Dépassement de l'aide-mémoire de syntaxe** : `DSL_FUNCTIONS` étant passé
+de 8 à 17 entrées (section précédente), le `<details>` « Aide-mémoire de la
+syntaxe » une fois déplié dépassait de la fenêtre sans scroll possible — son
+conteneur n'avait ni hauteur bornée ni `overflow`. Fix : `max-h-64
+overflow-y-auto` sur le bloc, même convention déjà utilisée dans ce fichier
+pour les blocs stdout/stderr de taille imprévisible. `SnippetsPanel.tsx`
+partage le même `DslCheatSheet()` mais son conteneur scrolle déjà
+(`sidebar-scroll ... overflow-y-auto`) — pas touché, pas cassé.
+
+**Sélection libre en mode « Langage » sans `target`** : les cases à cocher
+SSH restaient systématiquement désactivées (`disabled={mode === "intent"}`)
+dès qu'on passait en mode Langage, y compris pour un programme sans aucune
+ligne `target …` — qui, par la sémantique du DSL, s'applique alors à
+*tous* les hôtes, forçant une sélection « tout » sans possibilité de
+restreindre à la main. Fix : nouveau `programHasTargetLine(text)` (même
+détection de mot-frontière que `core::adaptive::looks_like_condition_line`,
+dupliquée côté TS faute d'un moyen léger de la partager avec le backend) —
+l'effet de sélection automatique (et le `disabled` des cases SSH) ne
+s'applique plus que si le programme a *au moins une* ligne `target`. Sans
+`target`, les cases SSH redeviennent cliquables comme en mode Commande ; les
+cases Docker exec/terminal local, elles, restent désactivées dans tous les
+cas (portée SSH-only de `run_adaptive_plan`, non liée à ce fix).
+
+**Sections redimensionnables à la souris** : demande explicite de
+cohérence avec le reste de l'UI. Repris **exactement** le mécanisme déjà
+utilisé quatre fois ailleurs (`App.tsx` : `sidebarWidth`/`rightPanelWidth`/
+`splitPercent` ; `TransferTab.tsx` : `leftPercent`) — jamais extrait en
+composant partagé (`SplitPane.tsx` ne l'est pas malgré son nom, ce n'est que
+le contenu du second panneau terminal), donc reproduit à l'identique plutôt
+que factorisé, pour rester cohérent avec la façon dont ce pattern existe
+déjà dans le reste du code : un ref de données de drag, un seul
+`mousemove`/`mouseup` sur `window` (pas sur la poignée elle-même — le drag
+continue même si le curseur sort de la fine bande de 4px), poignée `w-1
+shrink-0 cursor-col-resize` (barre visible de 1px, cible de 4px, couleur
+`--c-border` → `--c-accent` au survol). Aucune des quatre instances
+existantes ne persiste en session suivante — ce fix non plus, pour rester
+cohérent.
+- **Liste des cibles (gauche) vs composeur+résultats (droite)** : largeur
+  en pixels (`leftWidth`, défaut 288 = l'ancien `w-72` fixe, borné
+  220–500), même famille que `sidebarWidth`/`rightPanelWidth` (un panneau de
+  liste/navigation, pas deux zones de contenu qui se partagent l'espace).
+- **Composeur (haut) vs Résultats/Historique (bas)**, nouveau : aucun
+  équivalent vertical n'existait ailleurs dans l'app (les 4 instances
+  existantes sont toutes horizontales) — inventé en reprenant le même
+  principe que `splitPercent`/`leftPercent` (pourcentage de la hauteur du
+  conteneur, borné 20–70 %, défaut 40), poignée tournée à 90°
+  (`h-1 cursor-row-resize`, barre `w-full h-px`). Le composeur passe d'une
+  hauteur naturelle (`border-b p-3`) à une hauteur explicite
+  (`style={{height: \`${composerPercent}%\`}}`) + `overflow-y-auto` propre
+  (en plus du `max-h-64` déjà sur l'aide-mémoire, imbriqué sans conflit) ;
+  Résultats/Historique continue d'absorber le reste via `flex-1`, structure
+  déjà en place, pas de wrapper supplémentaire nécessaire.
+
+**Vérifié** : `tsc --noEmit`, `vitest run`, `clippy --workspace --all-targets
+-- -D warnings` (aucun Rust touché par ces trois fixs, revérifié par
+précaution), `node scripts/e2e-run.mjs` (smoke WSL/WebKitGTK). Rebuild +
+relance du binaire Windows natif pour test utilisateur réel des trois points
+(scroll de l'aide-mémoire, sélection libre sans `target`, glisser les trois
+nouvelles poignées).
+
+## Moteur adaptatif : revue de conception → idempotence, arrêt à la première erreur, fraîcheur des facts (2026-07-17)
+
+Suite à une discussion de conception avec l'utilisateur (retour honnête demandé sur le moteur adaptatif, et sur l'opportunité d'intégrer Ansible/Terraform — voir la section suivante pour cette partie). Trois lacunes identifiées et corrigées le jour même, toutes dans `core/src/adaptive.rs`.
+
+**Idempotence des nouvelles opérations utilisateur/dossier** — `useradd`/`userdel`
+(et leurs équivalents BusyBox/Windows) échouent net si la cible existe déjà
+(création) ou n'existe plus (suppression) : rejouer un `create-user`/
+`remove-user` sur une flotte partiellement déjà convergée faisait remonter un
+échec artificiel sur les hôtes déjà à jour. `user_cmd` protège désormais
+chaque branche par un test d'existence (`id -u` POSIX/BusyBox,
+`Get-LocalUser -ErrorAction SilentlyContinue` Windows) avant d'agir — voir
+le commentaire au-dessus de `user_cmd` pour le détail de pourquoi ce test
+ne déclenche jamais le garde-fou `set -e`/`$ErrorActionPreference` ajouté
+juste en dessous (POSIX exempte explicitement une commande utilisée comme
+condition d'un `if` ; `-ErrorAction SilentlyContinue` prime sur la
+préférence globale pour cet appel précis). Même piège sur
+`remove-directory` côté Windows : `Remove-Item -Recurse -Force` lève une
+erreur si le chemin est déjà absent (`-Force` ne veut dire que « ignore
+lecture-seule/caché », pas « ignore l'absence ») contrairement à `rm -rf`
+qui est idempotent par construction — protégé par un `if (Test-Path ...)`.
+**Non corrigé, noté plutôt que deviné** : `netsh advfirewall firewall add
+rule` sous Windows n'est pas idempotent (deux exécutions successives créent
+deux règles de même nom au lieu d'une seule) — pas de démon
+pare-feu/serveur Windows réel disponible dans cet environnement pour
+vérifier empiriquement un fix avant de l'appliquer, contrairement aux tests
+`id -u`/`Test-Path` qui sont des primitives POSIX/PowerShell bien connues et
+sans ambiguïté.
+
+**Arrêt à la première erreur entre blocs** — quand plusieurs blocs
+correspondent à un même hôte, `compose_for_host` les joignait par un simple
+`\n` : sans `set -e`, un échec dans le premier bloc n'empêchait pas le
+second de s'exécuter, et le code de sortie remonté à l'hôte était celui de
+la *dernière* commande — masquant silencieusement un vrai échec survenu
+plus tôt dans la séquence. Fix : le script composé est désormais préfixé de
+`set -e` (POSIX) ou `$ErrorActionPreference = 'Stop'` (Windows), choisi via
+`os_family(platform_key)`. `fish` comme shell de login distant n'est pas
+géré spécifiquement (`set -e` y a un tout autre sens — efface une
+variable) ; jugé un cas assez rare pour ne pas justifier une détection
+dédiée, documenté plutôt que traité en silence.
+
+**Fraîcheur des facts avant un run adaptatif** — `runPreview`
+(`FleetTab.tsx`) recollectait déjà les facts pour un hôte ciblé qui n'en
+avait *aucune*, mais pas pour un hôte dont les facts existaient mais
+dataient de plusieurs heures — une décision `target ram: > 80` pouvait donc
+se baser sur un instantané périmé sans qu'aucun signal ne le montre. Fix
+minimal : la même condition existante est élargie de « `lastFacts`
+absentes » à « absentes ou plus vieilles que 15 minutes »
+(`factsAreStale`), en réutilisant tel quel le même appel `collectFacts` déjà
+en place — pas de nouvelle UI, pas de nouveau chemin d'I/O. Le coût
+supplémentaire (un aller-retour SSH) n'est payé que quand les facts sont
+réellement périmées, donc jamais lors d'un cycle normal d'itération rapide
+(plusieurs clics « Prévisualiser » rapprochés restent instantanés, les
+facts collectées au premier clic restent fraîches pour les suivants).
+**Limite connue, non traitée** : rien ne revérifie la fraîcheur entre le
+moment où l'utilisateur clique « Prévisualiser » et le moment où il clique
+« Exécuter le plan » — un long délai entre les deux peut faire exécuter un
+plan calculé sur des facts entre-temps redevenues périmées. Volontairement
+pas corrigé : re-évaluer silencieusement juste avant l'exécution pourrait
+faire tourner un plan différent de celui que l'utilisateur vient de relire
+et valider, ce qui semble pire que le problème d'origine.
+
+**Vérifié** : 61 tests unitaires `adaptive::tests` (58 avant, incluant deux
+nouveaux tests dédiés au préfixe `set -e`/`$ErrorActionPreference`),
+`cargo test --workspace` (137 tests), `clippy --workspace --all-targets --
+-D warnings`, `tsc --noEmit`, `vitest run`, `node scripts/e2e-run.mjs`.
+Rebuild + relance du binaire Windows natif. **Non vérifié, comme pour le
+reste de ce moteur** : aucun de ces trois fixs n'a tourné pour de vrai
+contre un hôte réel (idempotence de `useradd`/`Remove-Item`, comportement
+de `set -e`/`$ErrorActionPreference` sur un vrai échec en milieu de
+séquence, ou le re-fetch de facts déclenché par la nouvelle fenêtre de
+15 minutes) — à valider par l'utilisateur.
+
+## DSL adaptatif → export Ansible : piste envisagée, pas encore implémentée (2026-07-17)
+
+Discussion de conception avec l'utilisateur : intégrer des fonctionnalités
+façon CI/CD/Ansible/Terraform dans le moteur adaptatif ? Terraform écarté —
+il résout un problème différent (provisionnement déclaratif de ressources
+cloud avec fichier d'état et graphe de dépendances entre providers), sans
+rapport avec ce que fait Guiterm (un client SSH/SFTP/RDP vers des machines
+déjà accessibles) ; s'y attaquer serait concurrencer un écosystème mûr et
+énorme sans aucune différenciation réelle.
+
+Ansible, en revanche, opère sur exactement le même substrat que Guiterm
+gère déjà (des hôtes déjà connectés en SSH) — piste jugée valable :
+**exporter un programme DSL + une sélection d'hôtes en playbook Ansible**,
+avec les `target tag:`/`target name:` convertis en groupes d'inventaire
+(mapping direct et sans perte) et chaque opération du DSL convertie vers le
+module Ansible idiomatique correspondant (`package`, `service`, `user`,
+`ufw`/`firewalld` community.general) plutôt que vers la commande shell brute
+de la table de rendu actuelle — ce qui a l'avantage de ne pas avoir à
+réimplémenter l'idempotence dans le playbook exporté, Ansible la fournit
+déjà nativement via ses propres modules. `sudo: true` → `become: true`,
+triviale. Le point dur : les conditions numériques (`ram`/`cpu`/`load`/
+`uptime`) n'ont pas d'équivalent en groupe d'inventaire, il faudrait les
+transformer en `when:` au niveau tâche contre des facts Ansible — dont les
+noms de champs exacts (`ansible_facts['memory_mb']['real']['total']` et
+consorts) sont notoirement pénibles à obtenir exactement juste sans les
+vérifier contre un vrai dump `ansible_facts`, indisponible dans cet
+environnement.
+
+Différence importante avec la piste « shell-out vers `ansible-playbook` »
+évoquée dans une conversation précédente : ceci reste un export **à sens
+unique et en lecture seule** (Program + hôtes → texte YAML), sans nouveau
+chemin d'exécution, sans dépendance à `ansible-playbook` installé, sans
+plomberie d'identifiants supplémentaire — un risque bien plus faible.
+Présenté comme un vrai « chemin de sortie » : prototyper vite dans le DSL
+léger contre une flotte réelle, puis exporter une fois l'automatisation
+assez mature pour vouloir des playbooks versionnés/partagés en équipe — ce
+que le DSL ne cherche justement pas à offrir (pas de fichier d'état, pas
+d'historique versionné au-delà de l'historique de runs propre à Guiterm).
+
+**Pas implémenté** — proposé comme chantier séparé, à scoper plus tard si
+l'utilisateur veut avancer dessus.
+
+## Revue exhaustive du 2026-07-18 : dette technique identifiée, 6 points corrigés le jour même
+
+Audit demandé par l'utilisateur (« quels seraient mes points d'amélioration,
+soit ultra exhaustif ») — trois explorations ciblées (backend Rust, frontend
+React, tests/CI/build), avec vérification manuelle des constats les plus
+actionnables avant de les considérer confirmés. Ce qui suit consomme ce qui
+n'était **pas déjà** documenté ailleurs dans ce fichier.
+
+**Les 6 points priorisés ci-dessous ont été corrigés le 2026-07-18, dans la
+foulée de l'audit** (plan détaillé dans la conversation, pas persisté tel
+quel) :
+1. CI : `ci.yml` lance désormais `npm run test` (job `frontend`) et
+   `cargo test --all-targets` pour `rdp-sidecar` (job `core`, après le
+   clippy déjà présent) — les deux étaient absents, voir plus bas.
+2. `core/src/transfer.rs::copy_dir` — `local_fs::list` enveloppé dans
+   `spawn_blocking`, même pattern que `list()`.
+3. `src-tauri/src/commands/keys.rs::deploy_public_key` — la `PrivateKey`
+   est clonée hors du lock, `resolve_key_content` tourne dans un
+   `spawn_blocking` séparé.
+4. `src/hooks/useResizablePane.ts` (nouveau) — remplace les 6 duplications
+   (`App.tsx` ×3, `TransferTab.tsx`, `FleetTab.tsx` ×2) listées plus bas.
+5. `core/src/port_forward.rs` (4 tests sur `socks_reply`) et
+   `core/src/ssh.rs` (7 tests sur `identity_of`/`label_of`/
+   `mismatch_error`/`ensure_success`) — modules `#[cfg(test)]` ajoutés.
+6. `src/hooks/useNotifications.ts` (nouveau) — extrait `status`/
+   `notifications` et les 5 fonctions associées d'`App.tsx` (+ `clearStatus`,
+   ajouté en cours de route pour le bouton de fermeture du bandeau
+   d'erreur, oublié dans le plan initial).
+7. `src/lib/tabPersistence.test.ts` (nouveau, 5 tests) + durcissement
+   `loadTabs` (`Array.isArray` avant de faire confiance au JSON parsé) +
+   export de `STORAGE_KEY`.
+
+**Piège rencontré en écrivant les tests `tabPersistence.test.ts`** :
+l'environnement vitest du projet est `"node"` (`vite.config.ts`), pas
+`jsdom` — aucun `localStorage` global. Plutôt que d'ajouter `jsdom` comme
+dépendance (non installé, juste listé `"*"` en pair optionnel transitif
+dans `package-lock.json`), un stub `MemoryStorage` minimal (`Map<string,
+string>` implémentant l'interface `Storage`) est posé sur
+`globalThis.localStorage` en tête du fichier de test — suffisant pour
+`getItem`/`setItem`/`clear`, aucun autre test du projet n'en a eu besoin
+jusqu'ici.
+
+**Vérifié pour les 6 points** : `cargo clippy --workspace --all-targets --
+-D warnings` propre (root + le `cargo test --all-targets` dédié de
+`rdp-sidecar`, workspace séparé), `cargo test -p termius-core` (148 tests,
+137 + 11 nouveaux) + les 4 suites d'intégration réelles (`sshd`) toutes
+vertes, `npx tsc --noEmit` propre, `npx vitest run` (24 tests, 19 + 5
+nouveaux), `npm run build` propre (le warning de taille de bundle est
+préexistant, voir plus bas dans ce fichier), `node scripts/e2e-run.mjs`
+(smoke WSL/WebKitGTK) au vert, binaire Windows natif release reconstruit et
+relancé pour test manuel utilisateur des 6 poignées de redimensionnement
+(seul point à comportement UI réellement modifié parmi les 6).
+
+**Bugs de blocage du runtime tokio confirmés (I/O synchrone dans une commande
+`async`, sans `spawn_blocking`)** — le correctif du 2026-07-12 (section
+« Nettoyage général + optimisations ») n'a couvert que 3 cas ; deux autres
+existent toujours, vérifiés en lisant le code :
+- `core/src/transfer.rs:228` — `copy_dir` (copie récursive de dossier,
+  local→remote et remote→remote) appelle `local_fs::list(&src_path)?` de
+  façon synchrone dans une fonction `async` — contrairement à
+  `transfer::list` (seule fonction effectivement corrigée le 2026-07-12).
+- `src-tauri/src/commands/keys.rs:15-23` — `resolve_key_content` fait un
+  `std::fs::read_to_string` synchrone, appelé par `deploy_public_key`
+  (`pub async fn`, ligne 79/91) sans `spawn_blocking`.
+
+**Lacunes de tests critiques** — modules qui traitent une entrée
+réseau/utilisateur sans aucun filet automatisé :
+- `core/src/ssh.rs` — 0 test / 544 lignes (auth + chaînage de bastions).
+- `core/src/port_forward.rs` — 0 test / 264 lignes, y compris le parsing du
+  protocole SOCKS5 (`handle_socks_connection`, `socks_reply`).
+- Côté frontend, un seul fichier de test dans tout `src/`
+  (`lib/lineBuffer.test.ts`) pour ~11 250 lignes de code — `operations.ts`,
+  `ghostText.ts`, `tabPersistence.ts` (logique pure, testable facilement)
+  n'ont aucune couverture.
+
+**CI incomplète, deux trous silencieux** :
+- `rdp-sidecar` n'est jamais réellement testé en CI (le job du 2026-07-11
+  build + lint, mais ne lance `cargo test` nulle part sur ce crate — il a
+  pourtant des `#[test]`, ex. `input.rs`).
+- Le job `frontend` de `ci.yml` ne lance que `tsc --noEmit` + `npm run
+  build` — `npm run test` (vitest) ne tourne jamais automatiquement, les
+  tests TS existants ne sont vérifiés qu'en local.
+- Autres trous mineurs : aucun `timeout-minutes` sur aucun job, pas de job
+  macOS (ni `ci.yml` ni `release.yml`), aucun ESLint configuré nulle part
+  (seul le type-check TS).
+
+**Duplication reconnue mais pas encore factorisée** :
+- La logique de redimensionnement à la souris (ref de drag +
+  `mousemove`/`mouseup` sur `window` + poignée `cursor-col-resize`) est
+  dupliquée **6 fois** au total (`App.tsx` ×3 — `sidebarWidth`/
+  `rightPanelWidth`/`splitPercent`, `TransferTab.tsx` ×1, `FleetTab.tsx` ×2 —
+  `leftWidth`/`composerPercent`), pas 4 comme noté lors de l'ajout des
+  poignées de `FleetTab.tsx` (section 2026-07-17). Un hook
+  `useResizablePane` réduirait cette duplication, jamais fait à ce jour.
+- `commands/terminal.rs::connect_terminal` et
+  `commands/docker.rs::connect_docker_exec` répètent presque mot pour mot
+  la séquence clone workspace → `startup_commands` → connect backend →
+  `spawn_output_bridge` → insertion dans `state.terminals` — pertinent à
+  factoriser avant qu'un futur backend K8s exec ne rajoute une 3e copie.
+
+**`App.tsx` : complexité croissante, pas encore un problème mais à
+surveiller** — 942 lignes, 28 `useState`, 11 `useEffect`, 0 `useMemo`,
+mélange onglets/persistance, notifications, préférences, état du vault,
+layout redimensionnable, orchestration de connexion. Chaque feature récente
+(flotte, moteur adaptatif, RDP) y a ajouté du poids sans jamais en retirer.
+
+**Fichiers hors code à la racine** : `gui-termius Prototype Connexions
+(standalone).html` (353 Ko, maquette statique déjà documentée comme non
+branchée au build) et `Redesign gui-termius.pdf` (272 Ko, jamais mentionné
+avant) — deux artefacts de design committés dans le repo de code, à
+déplacer ou `.gitignore` si non nécessaires au build.
+
+**Point de confiance noté, pas un bug** : importer un `workspace.json`
+externe (`export.rs`) peut ramener des `startup_snippets` qui s'exécutent
+automatiquement à la prochaine connexion sur l'hôte importé — pas une
+injection (le shell-quoting est correct), mais un fichier importé non fiable
+peut faire exécuter une commande sans confirmation explicite au moment de
+l'import.
 
 ## Habitudes de collaboration sur ce projet
 

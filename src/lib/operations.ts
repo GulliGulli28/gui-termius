@@ -11,10 +11,21 @@ export const DSL_FUNCTIONS: { name: string; args: string; label: string }[] = [
   { name: "restart-service", args: "<nom>", label: "Redémarrer un service" },
   { name: "enable-service", args: "<nom>", label: "Activer un service au démarrage" },
   { name: "disable-service", args: "<nom>", label: "Désactiver un service au démarrage" },
+  { name: "service-logs", args: "<nom>", label: "Afficher les logs récents d'un service" },
+  { name: "create-directory", args: "<chemin>", label: "Créer un dossier" },
+  { name: "remove-directory", args: "<chemin>", label: "Supprimer un dossier" },
+  { name: "create-user", args: "<nom>", label: "Créer un utilisateur" },
+  { name: "remove-user", args: "<nom>", label: "Supprimer un utilisateur" },
+  { name: "reboot", args: "", label: "Redémarrer l'hôte" },
+  { name: "set-hostname", args: "<nom>", label: "Changer le nom d'hôte" },
+  { name: "open-port", args: "<port>", label: "Ouvrir un port dans le pare-feu" },
+  { name: "close-port", args: "<port>", label: "Fermer un port dans le pare-feu" },
 ];
 
 export const DSL_CONDITION_FIELDS: { field: string; example: string }[] = [
   { field: "os", example: "target os: debian" },
+  { field: "name", example: "target name: web-  (nom de l'hôte/conteneur/shell, sous-chaîne)" },
+  { field: "tag", example: "target tag: production  (correspondance exacte)" },
   { field: "ram", example: "target ram: > 80" },
   { field: "cpu", example: "target cpu: >= 4" },
   { field: "load", example: "target load: > 1.5" },

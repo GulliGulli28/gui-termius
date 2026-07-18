@@ -11,6 +11,7 @@ pub mod keygen;
 pub mod known_hosts;
 pub mod master_vault;
 pub mod local_fs;
+pub mod local_shell;
 pub mod model;
 pub mod port_forward;
 pub mod secure_file;

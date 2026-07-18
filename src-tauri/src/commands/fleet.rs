@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
-use termius_core::fleet::{self, HostOutcome};
+use termius_core::fleet::{self, FleetTarget, HostOutcome};
 use termius_core::fleet_history::{self, FleetRun};
 use termius_core::model::HostId;
 use termius_core::sync_ext::MutexExt;
@@ -65,7 +65,7 @@ pub(crate) async fn execute_and_record(
     app: &AppHandle,
     state: &AppState,
     run_id: String,
-    commands: HashMap<HostId, String>,
+    commands: HashMap<FleetTarget, String>,
     summary_command: String,
     per_host_commands: Option<HashMap<HostId, String>>,
 ) -> Result<(), String> {
@@ -73,7 +73,7 @@ pub(crate) async fn execute_and_record(
     // Snapshot the workspace so the run sees a consistent view even if the user
     // edits hosts while it's in flight.
     let workspace = Arc::new(state.workspace.lock_recover().clone());
-    let host_ids: Vec<HostId> = commands.keys().copied().collect();
+    let targets: Vec<FleetTarget> = commands.keys().cloned().collect();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<HostOutcome>();
     tokio::spawn(fleet::run_on_hosts(workspace, commands, fleet::DEFAULT_CONCURRENCY, tx));
 
@@ -90,7 +90,7 @@ pub(crate) async fn execute_and_record(
         id: uuid::Uuid::new_v4(),
         started_at_ms,
         command: summary_command,
-        host_ids,
+        targets,
         outcomes: collected,
         per_host_commands,
     };
@@ -104,21 +104,21 @@ pub(crate) async fn execute_and_record(
     Ok(())
 }
 
-/// Runs `command` on every host in `host_ids` (SSH only — see
-/// [`termius_core::fleet`]), off any PTY. `run_id` is minted by the frontend
-/// so several runs can be in flight at once and be told apart on the shared
-/// event channel — the command itself resolves only once every host has
-/// reported. See [`execute_and_record`] for the shared streaming/history
-/// mechanics.
+/// Runs `command` on every target in `targets` — an SSH host, a Docker exec
+/// container, or the local machine (see [`FleetTarget`]) — off any PTY.
+/// `run_id` is minted by the frontend so several runs can be in flight at
+/// once and be told apart on the shared event channel — the command itself
+/// resolves only once every target has reported. See [`execute_and_record`]
+/// for the shared streaming/history mechanics.
 #[tauri::command]
 pub async fn run_fleet_command(
     app: AppHandle,
     state: State<'_, AppState>,
     run_id: String,
-    host_ids: Vec<HostId>,
+    targets: Vec<FleetTarget>,
     command: String,
 ) -> Result<(), String> {
-    let commands = fleet::uniform_commands(&host_ids, &command);
+    let commands = fleet::uniform_commands(&targets, &command);
     execute_and_record(&app, &state, run_id, commands, command, None).await
 }
 

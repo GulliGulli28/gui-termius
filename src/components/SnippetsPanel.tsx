@@ -307,7 +307,7 @@ function SnippetCard({
       </pre>
 
       {snippet.adaptive && (
-        <p className="mt-2 text-[10px] text-[var(--c-text-faint)]">Traduit selon l'OS détecté de chaque hôte ciblé (hôtes SSH avec état collecté) — aussi utilisable depuis Opérations de flotte.</p>
+        <p className="mt-2 text-[10px] text-[var(--c-text-faint)]">Traduit selon la plateforme détectée du terminal ciblé (hôte SSH, conteneur Docker exec ou terminal local — pas RDP) — les hôtes SSH sont aussi utilisables depuis Opérations de flotte.</p>
       )}
       <div className="mt-2">
         <TerminalTargetPicker terminals={openTerminals} selected={targets} onChange={setTargets} emptyLabel="Onglet actif" />

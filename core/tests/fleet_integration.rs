@@ -7,16 +7,18 @@ mod common;
 use common::{test_host, ClientKey, TestSshd};
 use std::collections::HashMap;
 use std::sync::Arc;
-use termius_core::fleet::{self, HostOutcome};
+use termius_core::fleet::{self, FleetTarget, HostOutcome};
 use termius_core::model::{Host, HostId, HostKind, Workspace};
 
 async fn run(workspace: Workspace, host_ids: Vec<HostId>, command: &str) -> HashMap<HostId, HostOutcome> {
+    let targets: Vec<FleetTarget> = host_ids.into_iter().map(|host_id| FleetTarget::Ssh { host_id }).collect();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let commands = fleet::uniform_commands(&host_ids, command);
+    let commands = fleet::uniform_commands(&targets, command);
     fleet::run_on_hosts(Arc::new(workspace), commands, fleet::DEFAULT_CONCURRENCY, tx).await;
     let mut out = HashMap::new();
     while let Some(o) = rx.recv().await {
-        out.insert(o.host_id, o);
+        let FleetTarget::Ssh { host_id } = o.target.clone() else { unreachable!("this test only builds SSH targets") };
+        out.insert(host_id, o);
     }
     out
 }

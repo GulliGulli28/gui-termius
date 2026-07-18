@@ -11,10 +11,12 @@ use crate::state::AppState;
 use serde::Deserialize;
 use std::collections::HashMap;
 use tauri::{AppHandle, State};
-use termius_core::adaptive::{self, ExecutionGroup};
-use termius_core::model::{HostId, Snippet, SnippetId, Workspace};
+use termius_core::adaptive::{self, ComposeResult, ExecutionGroup};
+use termius_core::fleet::FleetTarget;
+use termius_core::model::{HostFacts, HostId, Snippet, SnippetId, Workspace};
 use termius_core::store;
 use termius_core::sync_ext::MutexExt;
+use termius_core::{docker, facts, local_shell};
 use termius_core::vault;
 
 /// Asks the AI to write (`existing_text` empty) or extend it with `intent`.
@@ -39,6 +41,59 @@ pub fn preview_adaptive_program(
     Ok(adaptive::preview(&workspace, &host_ids, &program))
 }
 
+/// Translates `program_text` for a **local terminal** tab's shell — a
+/// native Windows shell (PowerShell/cmd) needs no probing at all, the
+/// platform is simply whatever OS Guiterm itself runs on; anything else
+/// (a real POSIX shell, WSL) is probed for real via a one-off local process
+/// (`facts::probe_local`), the same mechanism SSH/Docker exec use, just run
+/// locally instead of over a connection. Single target, so this returns a
+/// [`ComposeResult`] directly rather than [`preview_adaptive_program`]'s
+/// per-host grouping.
+#[tauri::command]
+pub async fn compose_adaptive_for_local(program_text: String, shell: Option<String>) -> Result<ComposeResult, String> {
+    let resolved_shell = local_shell::resolve_local_shell(shell.as_deref());
+    let host_facts = if local_shell::is_windows_native_shell(&resolved_shell) {
+        Some(HostFacts { os_id: Some("windows".to_string()), os_name: Some("Windows".to_string()), ..Default::default() })
+    } else {
+        let shell_for_probe = resolved_shell.clone();
+        tokio::task::spawn_blocking(move || facts::probe_local(&shell_for_probe))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    let program = adaptive::parse_program(&program_text)?;
+    let platform_key = host_facts.as_ref().and_then(|f| f.os_id.clone()).unwrap_or_else(|| "unknown".to_string());
+    // No tags: a local terminal has no `Host` to draw them from — only
+    // `target name` (matched against the shell name) is meaningful here.
+    let ctx = adaptive::HostContext { facts: host_facts.as_ref(), name: &resolved_shell, tags: &[] };
+    Ok(adaptive::compose_for_host(&program, &platform_key, ctx))
+}
+
+/// Translates `program_text` for a **Docker exec** terminal's container —
+/// probed fresh via a one-off `exec` on every call, never cached: unlike an
+/// SSH `Host`, a `dockerExec` `Host` isn't tied to one container (see
+/// `HostKind::DockerExec`'s doc comment), so there's nowhere to persist a
+/// single `lastFacts` snapshot without conflating different containers.
+#[tauri::command]
+pub async fn compose_adaptive_for_docker(
+    state: State<'_, AppState>,
+    program_text: String,
+    host_id: HostId,
+    container_id: String,
+) -> Result<ComposeResult, String> {
+    let workspace = state.workspace.lock_recover().clone();
+    let host = workspace.host(host_id).ok_or_else(|| "hôte inconnu".to_string())?;
+    let docker_client = docker::connect_for_host(&workspace, host).await.map_err(|e| e.to_string())?;
+    let host_facts = docker::probe_container_facts(&docker_client, &container_id).await;
+    let program = adaptive::parse_program(&program_text)?;
+    let platform_key = host_facts.as_ref().and_then(|f| f.os_id.clone()).unwrap_or_else(|| "unknown".to_string());
+    // `name` mirrors the tab label convention (`${host.label} : ${containerId}`,
+    // see `App.tsx`'s `openTab`) so `target name` reads the same way a user
+    // already sees the target named elsewhere in the UI.
+    let name = format!("{} : {container_id}", host.label);
+    let ctx = adaptive::HostContext { facts: host_facts.as_ref(), name: &name, tags: &host.tags };
+    Ok(adaptive::compose_for_host(&program, &platform_key, ctx))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupCommand {
@@ -60,17 +115,22 @@ pub async fn run_adaptive_plan(
     intent: String,
     groups: Vec<GroupCommand>,
 ) -> Result<(), String> {
-    let mut commands = HashMap::new();
+    let mut per_host: HashMap<HostId, String> = HashMap::new();
     for group in &groups {
         for &host_id in &group.host_ids {
-            commands.insert(host_id, group.command.clone());
+            per_host.insert(host_id, group.command.clone());
         }
     }
-    if commands.is_empty() {
+    if per_host.is_empty() {
         return Err("aucun hôte à cibler".to_string());
     }
-    let per_host_commands = Some(commands.clone());
-    execute_and_record(&app, &state, run_id, commands, intent, per_host_commands).await
+    // Adaptive runs are SSH-only (see `preview_adaptive_program`), so every
+    // target here wraps an SSH host id — `per_host_commands` stays keyed by
+    // plain `HostId` (unaffected by `FleetTarget` existing) since that's the
+    // shape `FleetRun`/the frontend's per-platform breakdown already expect.
+    let commands: HashMap<FleetTarget, String> =
+        per_host.iter().map(|(&host_id, cmd)| (FleetTarget::Ssh { host_id }, cmd.clone())).collect();
+    execute_and_record(&app, &state, run_id, commands, intent, Some(per_host)).await
 }
 
 /// Creates (`snippet_id: None`) or updates an adaptive snippet — `command`

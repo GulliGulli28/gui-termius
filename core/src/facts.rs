@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// Single-line POSIX `sh` probe. Every value is emitted as a `KEY=value` line so
 /// [`parse_facts`] can ignore any unrelated shell noise and pick only the keys
 /// it knows — robust against MOTD lines, warnings, etc.
-const PROBE: &str = "export LC_ALL=C 2>/dev/null; \
+pub(crate) const PROBE: &str = "export LC_ALL=C 2>/dev/null; \
 echo \"HOSTNAME=$(hostname 2>/dev/null)\"; \
 echo \"KERNEL=$(uname -sr 2>/dev/null)\"; \
 echo \"ARCH=$(uname -m 2>/dev/null)\"; \
@@ -86,7 +86,8 @@ pub async fn collect(
     concurrency: usize,
 ) -> Vec<FactsOutcome> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<HostOutcome>();
-    let commands = fleet::uniform_commands(&host_ids, PROBE);
+    let targets: Vec<fleet::FleetTarget> = host_ids.into_iter().map(|host_id| fleet::FleetTarget::Ssh { host_id }).collect();
+    let commands = fleet::uniform_commands(&targets, PROBE);
     fleet::run_on_hosts(workspace, commands, concurrency, tx).await;
     let mut out = Vec::new();
     while let Some(outcome) = rx.recv().await {
@@ -96,17 +97,44 @@ pub async fn collect(
 }
 
 fn to_facts_outcome(o: HostOutcome) -> FactsOutcome {
+    // `collect` above only ever builds `Ssh` targets.
+    let fleet::FleetTarget::Ssh { host_id } = o.target else {
+        unreachable!("facts::collect only ever targets SSH hosts")
+    };
     if let Some(error) = o.error {
-        return FactsOutcome { host_id: o.host_id, facts: None, error: Some(error) };
+        return FactsOutcome { host_id, facts: None, error: Some(error) };
     }
     if o.exit_code != Some(0) {
         return FactsOutcome {
-            host_id: o.host_id,
+            host_id,
             facts: None,
             error: Some(format!("sonde d'état en échec (code {:?})", o.exit_code)),
         };
     }
-    FactsOutcome { host_id: o.host_id, facts: Some(parse_facts(&o.stdout)), error: None }
+    FactsOutcome { host_id, facts: Some(parse_facts(&o.stdout)), error: None }
+}
+
+/// Probes the *local* machine the same way [`collect`] probes a remote host
+/// over SSH — runs [`PROBE`] as a one-shot, non-interactive process via
+/// `local_shell::one_shot_command` (never the live interactive
+/// local-terminal pty, which is already showing a prompt), and parses its
+/// stdout the same way. Used by the adaptive snippet engine to translate a
+/// DSL program for a local terminal tab
+/// (`local_shell::is_windows_native_shell` gates when this is even worth
+/// trying — a native Windows shell has no POSIX `sh` to run this through).
+/// Blocking (spawns a real OS process and waits) — callers on the async
+/// side must wrap this in `spawn_blocking`.
+///
+/// `None` — from a failed spawn, a non-zero exit, or a probe that ran but
+/// found nothing recognizable (e.g. Git Bash, which has no real
+/// `/etc/os-release`) — all collapse to "facts unknown", exactly like an
+/// unreachable SSH host.
+pub fn probe_local(shell: &str) -> Option<HostFacts> {
+    let output = crate::local_shell::one_shot_command(shell, PROBE).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_facts(&String::from_utf8_lossy(&output.stdout)))
 }
 
 #[cfg(test)]
@@ -157,5 +185,19 @@ MEMTOTAL_KB=4000000
         // No MemAvailable → no used/pct, but total still known.
         assert_eq!(f.mem_used_mb, None);
         assert_eq!(f.mem_used_pct, None);
+    }
+
+    #[test]
+    fn probe_local_returns_none_for_a_shell_that_cannot_be_spawned() {
+        assert!(probe_local("/definitely/not/a/real/shell/binary").is_none());
+    }
+
+    // Exercises a *real* local process — no SSH/RDP server needed, unlike
+    // most of this crate's "not verified against a real host" caveats.
+    #[cfg(not(windows))]
+    #[test]
+    fn probe_local_runs_the_real_probe_on_a_real_posix_shell() {
+        let facts = probe_local("sh").expect("a real local sh should produce facts");
+        assert!(facts.kernel.is_some());
     }
 }

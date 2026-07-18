@@ -192,13 +192,7 @@ pub async fn open_local_terminal(app: AppHandle, state: State<'_, AppState>, she
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::io::Read;
 
-    let shell = shell.filter(|s| !s.is_empty()).unwrap_or_else(|| {
-        if cfg!(windows) {
-            "powershell.exe".to_string()
-        } else {
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-        }
-    });
+    let shell = termius_core::local_shell::resolve_local_shell(shell.as_deref());
 
     let pty_system = native_pty_system();
     let pair = pty_system
