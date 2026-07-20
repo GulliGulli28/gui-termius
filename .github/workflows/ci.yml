@@ -51,6 +51,48 @@ jobs:
       - name: Test (rdp-sidecar)
         run: cd rdp-sidecar && cargo test --all-targets
 
+  core-macos:
+    # macOS coverage for termius-core + rdp-sidecar, mirroring the `core` job
+    # above — no full Tauri/webview build here (that's `windows-workspace`'s
+    # job, mirroring release.yml's packaging environment): release.yml
+    # doesn't currently ship a macOS build at all, so a full macOS Tauri
+    # build/package isn't attempted here either, only kept in scope for a
+    # possible later addition. This job exists to catch macOS-specific Rust
+    # portability regressions early, same reasoning as `core` for Linux.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # rdp-sidecar is its own separate Cargo workspace (own Cargo.lock —
+          # see CLAUDE.md's "Pourquoi un processus RDP séparé"), so it needs
+          # its own cache entry; the default only picks up the root workspace.
+          workspaces: |
+            . -> target
+            rdp-sidecar -> target
+
+      # Unlike ubuntu-latest, the macOS runner image ships /usr/sbin/sshd and
+      # ssh-keygen as part of the base OS — core/tests/common/mod.rs spawns
+      # sshd directly as a subprocess (not via the "Remote Login" service),
+      # so no install step is needed here the way `core`'s Linux job needs
+      # `apt-get install openssh-server`.
+      - name: Clippy (termius-core)
+        run: cargo clippy -p termius-core --all-targets -- -D warnings
+
+      - name: Test (termius-core)
+        run: cargo test -p termius-core --all-targets
+
+      - name: Clippy (rdp-sidecar)
+        run: cd rdp-sidecar && cargo clippy --all-targets -- -D warnings
+
+      - name: Test (rdp-sidecar)
+        run: cd rdp-sidecar && cargo test --all-targets
+
   windows-workspace:
     # Full workspace (including the Tauri binary) mirrors release.yml's
     # environment, since Tauri needs WebView2 which ships on windows-latest.
@@ -134,6 +176,9 @@ jobs:
 
       - name: Type-check
         run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
 
       - name: Test
         run: npm run test

@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+
 interface PickerItem {
   id: string;
   name: string;
@@ -21,6 +23,14 @@ interface ConnectionPickerModalProps {
  * than a single connectable thing — same chrome for a real, loading list
  * and a stubbed, example one. */
 export function ConnectionPickerModal({ title, warning, loading, error, items, onPick, onClose }: ConnectionPickerModalProps) {
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
   return (
     <>
       <div className="fixed inset-0 z-30 bg-black/50" onClick={onClose} />

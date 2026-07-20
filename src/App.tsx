@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
-import { save } from "@tauri-apps/plugin-dialog";
-import { api, bytesToBase64 } from "./lib/api";
+import { api } from "./lib/api";
 import type { GroupId, Host, HostId, TabMeta, VaultStatus, Workspace } from "./lib/types";
 import { Sidebar, type SidebarPanelKind } from "./components/Sidebar";
 import { HostForm } from "./components/HostForm";
@@ -22,27 +21,10 @@ import { SnippetPicker } from "./components/SnippetPicker";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { VaultUnlockModal } from "./components/VaultUnlockModal";
 import { SHORTCUT_ACTIONS, useGlobalShortcuts } from "./lib/shortcuts";
-import { loadTabs, saveTabs } from "./lib/tabPersistence";
 import { useNotifications } from "./hooks/useNotifications";
 import { useResizablePane } from "./hooks/useResizablePane";
-
-let nextTabId = 0;
-const SPLIT_PANE_ID = "split-pane";
-
-// `shellCapable`: false for an RDP target (see `RdpTab.tsx`'s handle) — it
-// has no shell/PTY to pipe a base64-decoded script into, so a multi-line
-// command is instead typed as-is (its own `runCommand` turns each embedded
-// `\n` into a real Enter keypress line by line, unrelated to this wrapping).
-function runOnTerminalHandle(handle: TerminalTabHandle, command: string, shellCapable: boolean) {
-  if (shellCapable && command.includes("\n")) {
-    // Encode script as base64 and decode+execute in one line so the terminal
-    // only shows a compact command, not the full script content.
-    const b64 = bytesToBase64(new TextEncoder().encode(command));
-    handle.runCommand(`echo '${b64}' | base64 -d | bash`);
-  } else {
-    handle.runCommand(command);
-  }
-}
+import { useTabs } from "./hooks/useTabs";
+import { useBroadcast, SPLIT_PANE_ID } from "./hooks/useBroadcast";
 
 export default function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
@@ -51,8 +33,6 @@ export default function App() {
   const [editingHost, setEditingHost] = useState<Host | "new" | null>(null);
   const [editingGroup, setEditingGroup] = useState<GroupFormData | null>(null);
   const [newHostDefaultGroupId, setNewHostDefaultGroupId] = useState<GroupId | null>(null);
-  const [tabs, setTabs] = useState<TabMeta[]>([]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const {
     status,
     notifications,
@@ -66,6 +46,7 @@ export default function App() {
   const [preferences, setPreferences] = useState<AppPreferences>(loadPreferences);
   const [splitOpen, setSplitOpen] = useState(false);
   const [splitSource, setSplitSource] = useState<"local" | HostId>("local");
+  const toggleSplit = useCallback(() => setSplitOpen((v) => !v), []);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [snippetPickerOpen, setSnippetPickerOpen] = useState(false);
   const terminalRefs = useRef<Map<string, TerminalTabHandle>>(new Map());
@@ -203,277 +184,20 @@ export default function App() {
 
   const refreshWorkspace = useCallback((next: Workspace) => setWorkspace(next), []);
 
-  // ── Tab management ───────────────────────────────────────────────────────
-  const openTab = useCallback((kind: "terminal" | "transfer" | "rdp-view", host: Host, dockerContainerId?: string) => {
-    const id = `tab-${nextTabId++}`;
-    const label = kind === "transfer"
-      ? `Transfert : ${host.label}`
-      : kind === "rdp-view"
-        ? `Aperçu : ${host.label}`
-        : (dockerContainerId ? `${host.label} : ${dockerContainerId}` : host.label);
-    setTabs((prev) => [...prev, { id, kind, hostId: host.id, label, dockerContainerId }]);
-    setActiveTabId(id);
-  }, []);
+  const {
+    tabs, setTabs, activeTabId, setActiveTabId,
+    pendingCloseTabId, setPendingCloseTabId,
+    openTab, openLocalTerminal, openFleet, reconnectTab,
+    closeTab, requestCloseTab,
+    runSnippet, runAdaptiveSnippet, exportActiveScrollback,
+  } = useTabs({ workspace, preferences, terminalRefs, pushNotification, reportError, refreshWorkspace });
 
-  const openLocalTerminal = useCallback((initialCommand?: string, shell?: string | null) => {
-    const id = `tab-${nextTabId++}`;
-    const label = initialCommand ? `ssh ${initialCommand.replace(/^ssh\s+/, "")}` : "Terminal local";
-    setTabs((prev) => [...prev, { id, kind: "local-terminal", label, initialCommand, shell: shell ?? preferences.defaultLocalShell }]);
-    setActiveTabId(id);
-  }, [preferences.defaultLocalShell]);
-
-  // Only one Fleet tab makes sense at a time (it isn't host-scoped like a
-  // terminal/transfer tab) — focus the existing one instead of piling up
-  // duplicates when opened repeatedly from the toolbar button.
-  const openFleet = useCallback(() => {
-    setTabs((prev) => {
-      const existing = prev.find((t) => t.kind === "fleet");
-      if (existing) {
-        setActiveTabId(existing.id);
-        return prev;
-      }
-      const id = `tab-${nextTabId++}`;
-      setActiveTabId(id);
-      return [...prev, { id, kind: "fleet", label: "Opérations de flotte" }];
-    });
-  }, []);
-
-  const toggleSplit = useCallback(() => setSplitOpen((v) => !v), []);
-
-  const reconnectTab = useCallback((id: string) => {
-    setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, status: "connected" } : t)));
-  }, []);
-
-  // Restore the last session's tab list (as disconnected placeholders) once, right after
-  // the workspace loads. Never auto-reconnects — the user clicks a placeholder to do that.
-  const restoredTabsRef = useRef(false);
-  useEffect(() => {
-    if (!workspace || restoredTabsRef.current) return;
-    restoredTabsRef.current = true;
-    if (!preferences.restoreTabsOnLaunch) return;
-    const persisted = loadTabs();
-    const restored: TabMeta[] = persisted.flatMap((p): TabMeta[] => {
-      const id = `tab-${nextTabId++}`;
-      if (p.kind === "local-terminal") {
-        return [{ id, kind: "local-terminal", label: p.label, status: "placeholder", shell: p.shell }];
-      }
-      if (!p.hostId || !workspace.hosts.some((h) => h.id === p.hostId)) return [];
-      return [{ id, kind: p.kind, hostId: p.hostId, label: p.label, status: "placeholder", dockerContainerId: p.dockerContainerId }];
-    });
-    if (restored.length > 0) {
-      setTabs(restored);
-      setActiveTabId(restored[0].id);
-    }
-  }, [workspace, preferences.restoreTabsOnLaunch]);
-
-  // Persist the (trimmed, session-less) tab list on every change, once the initial
-  // restore pass above has already run.
-  useEffect(() => {
-    if (!restoredTabsRef.current || !preferences.restoreTabsOnLaunch) return;
-    saveTabs(tabs);
-  }, [tabs, preferences.restoreTabsOnLaunch]);
-
-  const closeTab = useCallback((id: string, reason?: "disconnected") => {
-    terminalRefs.current.get(id)?.dispose();
-    terminalRefs.current.delete(id);
-    setTabs((prev) => {
-      const closed = prev.find((t) => t.id === id);
-      if (reason === "disconnected" && closed && preferences.notifyOnDisconnect !== false) {
-        pushNotification("error", `Connexion perdue : ${closed.label}`);
-      }
-      const next = prev.filter((t) => t.id !== id);
-      setActiveTabId((current) => (current === id ? (next.length > 0 ? next[next.length - 1].id : null) : current));
-      return next;
-    });
-  }, [preferences.notifyOnDisconnect, pushNotification]);
-
-  // Closing a tab with a live SSH session is easy to trigger by accident (a stray
-  // Ctrl+Shift+W, a misclick) and kills the remote session outright, so it goes
-  // through a confirmation instead of closing immediately.
-  const [pendingCloseTabId, setPendingCloseTabId] = useState<string | null>(null);
-  const requestCloseTab = useCallback((id: string) => {
-    const tab = tabs.find((t) => t.id === id);
-    if (tab && tab.kind === "terminal" && tab.status !== "placeholder") {
-      setPendingCloseTabId(id);
-    } else {
-      closeTab(id);
-    }
-  }, [tabs, closeTab]);
-
-  // Runs a snippet/script on specific tabs, or the active tab when no target is given
-  // (e.g. from the Snippets panel, where an empty selection means "just the active tab").
-  const runSnippet = useCallback((command: string, targetTabIds?: string[]) => {
-    const ids = targetTabIds && targetTabIds.length > 0 ? targetTabIds : activeTabId ? [activeTabId] : [];
-    if (ids.length === 0) { reportError("Aucun terminal actif pour exécuter ce snippet"); return; }
-    let ran = false;
-    for (const id of ids) {
-      const handle = terminalRefs.current.get(id);
-      if (handle) { runOnTerminalHandle(handle, command, tabs.find((t) => t.id === id)?.kind !== "rdp-view"); ran = true; }
-    }
-    if (!ran) reportError("Aucun terminal ouvert pour exécuter ce snippet");
-  }, [activeTabId, reportError, tabs]);
-
-  // Runs an adaptive (DSL) snippet on specific tabs, or the active tab when
-  // no target is given — same convention as `runSnippet`. Unlike a classic
-  // snippet, `programText` isn't a runnable command by itself: each target's
-  // platform determines what actually gets typed (see `core::adaptive`), so
-  // this resolves per target before running the *translated* command.
-  // Three kinds of target are supported, each with its own way of finding
-  // out "what platform is this": an SSH host's last collected facts
-  // (batched through `previewAdaptiveProgram`, collecting first if missing —
-  // same as `FleetTab`'s "Prévisualiser"), a Docker exec container (probed
-  // fresh via `composeAdaptiveForDocker`, one call per target — no facts to
-  // reuse across calls, a `dockerExec` host isn't tied to one container),
-  // or a local terminal's shell (`composeAdaptiveForLocal` — instant for a
-  // native Windows shell, probed locally otherwise). RDP and anything else
-  // is reported and skipped rather than silently typing the raw DSL text.
-  const runAdaptiveSnippet = useCallback(async (programText: string, targetTabIds?: string[]) => {
-    if (!workspace) return;
-    const ids = targetTabIds && targetTabIds.length > 0 ? targetTabIds : activeTabId ? [activeTabId] : [];
-    if (ids.length === 0) { reportError("Aucun terminal actif pour exécuter ce snippet"); return; }
-
-    const runTranslated = (label: string, handle: TerminalTabHandle, result: { command: string | null; note: string | null }) => {
-      if (!result.command) { reportError(`« ${label} » : ${result.note ?? "rien à exécuter pour cet hôte"}`); return; }
-      runOnTerminalHandle(handle, result.command, true);
-    };
-
-    const sshTargets: { label: string; hostId: HostId; handle: TerminalTabHandle }[] = [];
-    for (const id of ids) {
-      const tab = tabs.find((t) => t.id === id);
-      const handle = terminalRefs.current.get(id);
-      if (!tab || !handle) continue;
-
-      if (tab.kind === "local-terminal") {
-        api.composeAdaptiveForLocal(programText, tab.shell ?? null)
-          .then((result) => runTranslated(tab.label, handle, result))
-          .catch((e) => reportError(String(e)));
-        continue;
-      }
-
-      const ineligible = () => reportError(`« ${tab.label} » : un snippet adaptatif ne peut s'exécuter que sur un terminal local, un hôte SSH ou Docker exec`);
-      if (tab.kind !== "terminal") { ineligible(); continue; }
-      const host = workspace.hosts.find((h) => h.id === tab.hostId);
-      if (!host) { ineligible(); continue; }
-
-      if (host.kind === "dockerExec") {
-        if (!tab.dockerContainerId) { reportError(`« ${tab.label} » : aucun conteneur associé à cet onglet`); continue; }
-        api.composeAdaptiveForDocker(programText, host.id, tab.dockerContainerId)
-          .then((result) => runTranslated(tab.label, handle, result))
-          .catch((e) => reportError(String(e)));
-        continue;
-      }
-      if (host.kind !== "ssh") { ineligible(); continue; }
-      sshTargets.push({ label: tab.label, hostId: host.id, handle });
-    }
-    if (sshTargets.length === 0) return;
-
-    const missingFacts = [...new Set(sshTargets.filter((e) => !workspace.hosts.find((h) => h.id === e.hostId)?.lastFacts).map((e) => e.hostId))];
-    if (missingFacts.length > 0) {
-      try {
-        refreshWorkspace((await api.collectFacts(missingFacts)).workspace);
-      } catch (e) {
-        reportError(String(e));
-      }
-    }
-
-    try {
-      const groups = await api.previewAdaptiveProgram([...new Set(sshTargets.map((e) => e.hostId))], programText);
-      const groupByHost = new Map(groups.flatMap((g) => g.hostIds.map((id) => [id, g] as const)));
-      for (const target of sshTargets) {
-        runTranslated(target.label, target.handle, groupByHost.get(target.hostId) ?? { command: null, note: "rien à exécuter pour cet hôte" });
-      }
-    } catch (e) {
-      reportError(String(e));
-    }
-  }, [activeTabId, tabs, workspace, reportError, refreshWorkspace]);
-
-  const exportActiveScrollback = useCallback(async () => {
-    if (!activeTabId) { reportError("Aucun terminal actif à exporter"); return; }
-    const handle = terminalRefs.current.get(activeTabId);
-    if (!handle) { reportError("L'onglet actif n'est pas un terminal"); return; }
-    const tabLabel = tabs.find((t) => t.id === activeTabId)?.label ?? "terminal";
-    const path = await save({
-      defaultPath: `${tabLabel.replace(/[^\w.-]+/g, "_")}.log`,
-      filters: [{ name: "Journal", extensions: ["log", "txt"] }],
-    }).catch(() => null);
-    if (!path) return;
-    api.exportText(path, handle.getScrollbackText()).catch((e) => reportError(String(e)));
-  }, [activeTabId, tabs, reportError]);
-
-  // ── Broadcast: send one command to a chosen set of open terminals ───────
-  const [broadcastMode, setBroadcastMode] = useState(false);
-  const splitPaneLabel = splitSource === "local"
-    ? "Terminal local (panneau 2)"
-    : `${workspace?.hosts.find((h) => h.id === splitSource)?.label ?? "Hôte"} (panneau 2)`;
-  // The split view's second panel is a standalone terminal outside the tab list, so
-  // it has to be added to the broadcast/snippet target list by hand.
-  const broadcastTargets: { id: string; label: string }[] = [
-    ...tabs
-      .filter((t) => (t.kind === "terminal" || t.kind === "local-terminal" || t.kind === "rdp-view") && t.status !== "placeholder")
-      .map((t) => ({ id: t.id, label: t.label })),
-    ...(splitOpen ? [{ id: SPLIT_PANE_ID, label: splitPaneLabel }] : []),
-  ];
-  const [broadcastSelected, setBroadcastSelected] = useState<Set<string>>(new Set());
-
-  // Terminals that open *after* broadcast mode was turned on (a new tab, the split
-  // view's second panel, …) join the selection automatically, and ones that close
-  // (including the split view's panel) drop out of both the selection and the count.
-  // A brand-new id is only auto-added the first time it's ever seen — reordering tabs
-  // (or any other change that merely re-triggers this effect) must never resurrect a
-  // target the user deliberately unchecked earlier.
-  const knownTargetIdsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const currentIds = new Set(broadcastTargets.map((t) => t.id));
-    const previouslyKnown = knownTargetIdsRef.current;
-    if (broadcastMode) {
-      setBroadcastSelected((prev) => {
-        const next = new Set(prev);
-        let changed = false;
-        for (const id of prev) {
-          if (!currentIds.has(id)) { next.delete(id); changed = true; }
-        }
-        for (const id of currentIds) {
-          if (!previouslyKnown.has(id) && !next.has(id)) { next.add(id); changed = true; }
-        }
-        return changed ? next : prev;
-      });
-    }
-    knownTargetIdsRef.current = currentIds;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [broadcastMode, tabs, splitOpen, splitSource]);
-
-  // Not a useCallback: it needs the current render's `broadcastTargets` (which
-  // depends on `tabs`, `splitOpen`, `splitSource`, `workspace`), and memoizing on
-  // an incomplete dep list previously meant opening the split view (which doesn't
-  // touch `tabs`) left this closure holding a stale target list — so turning
-  // broadcast on right after would silently miss the split pane.
-  const toggleBroadcastMode = () => {
-    setBroadcastMode((v) => {
-      const next = !v;
-      if (next) setBroadcastSelected(new Set(broadcastTargets.map((t) => t.id)));
-      else setLiveSyncMode(false);
-      return next;
-    });
-  };
-
-  const broadcastCommand = useCallback((command: string) => {
-    for (const id of broadcastSelected) {
-      const handle = terminalRefs.current.get(id);
-      if (handle) runOnTerminalHandle(handle, command, tabs.find((t) => t.id === id)?.kind !== "rdp-view");
-    }
-  }, [broadcastSelected, tabs]);
-
-  // Live mode: keystrokes typed into whichever terminal has focus are mirrored, as
-  // raw input, to every other selected terminal — unlike broadcastCommand above,
-  // which sends one discrete command at a time to all of them.
-  const [liveSyncMode, setLiveSyncMode] = useState(false);
-  const mirrorInput = useCallback((sourceTabId: string, data: string) => {
-    if (!liveSyncMode) return;
-    for (const id of broadcastSelected) {
-      if (id === sourceTabId) continue;
-      terminalRefs.current.get(id)?.writeRaw(data);
-    }
-  }, [liveSyncMode, broadcastSelected]);
+  const {
+    broadcastMode, setBroadcastMode,
+    broadcastTargets, broadcastSelected, setBroadcastSelected,
+    toggleBroadcastMode, broadcastCommand,
+    liveSyncMode, setLiveSyncMode, mirrorInput,
+  } = useBroadcast({ tabs, splitOpen, splitSource, workspace, terminalRefs });
 
   // ── Global keyboard shortcuts + command palette ─────────────────────────
   const shortcutHandlers: Record<string, () => void> = {

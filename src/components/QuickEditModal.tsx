@@ -17,6 +17,16 @@ export function QuickEditModal({ fileName, content, loading, saving, error, onSa
   // `content` arrives asynchronously (after the read completes) — sync it once loaded.
   useEffect(() => { if (!loading) setValue(content); }, [content, loading]);
 
+  // Same no-confirmation close as the backdrop click / X button below — Escape
+  // is just another way to trigger the same onClose, not a new discard path.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
   return (
     <>
       <div className="fixed inset-0 z-30 bg-black/60" onClick={onClose} />

@@ -74,7 +74,10 @@ function statusOf(key: string, results: Map<string, FleetOutcome>, pending: Set<
 function countOutcomes(outcomes: FleetOutcome[]): { ok: number; fail: number } {
   let ok = 0;
   let fail = 0;
-  for (const o of outcomes) (outcomeStatus(o) === "ok" ? ok++ : fail++);
+  for (const o of outcomes) {
+    if (outcomeStatus(o) === "ok") ok++;
+    else fail++;
+  }
   return { ok, fail };
 }
 

@@ -1181,6 +1181,24 @@ Conservé pour tout futur bug Docker/SSH — pas un script jetable.
   — c'est ce mécanisme, pas un `&` shell, qui garde le process vivant entre
   deux appels d'outil.
 
+- **`$(commande)`/`$?` dans une commande `wsl.exe -e bash -lc "..."` lancée
+  depuis l'outil Bash (Git Bash) sont expansés par le shell EXTERNE avant
+  même d'atteindre WSL, si la chaîne est en double guillemets.** Piège
+  vicieux : `wsl.exe -e bash -lc "... ; echo EXIT=$?"` semble marcher (affiche
+  bien `EXIT=0` ou `EXIT=1`), mais `$?` a été substitué par Git Bash — le
+  `$?` de la commande interne à WSL n'est *jamais* évalué, seul celui,
+  périmé, de l'outer shell l'est. Rencontré en croyant à tort qu'`eslint`
+  sortait toujours en code 0 malgré une vraie erreur (`✖ 1 problems (1
+  error...)` affiché, mais `EXIT=0` rapporté) — confirmé en isolant le bug
+  avec un test minimal (`wsl.exe -e bash -lc "false; echo SANITY=$?"` →
+  affiche `SANITY=0`, jamais `1`). Fix : entourer la commande interne de
+  guillemets **simples** (`wsl.exe -e bash -lc '... ; echo EXIT=$?'`) pour
+  que Git Bash ne touche pas à `$?`/`$(...)`, laissant WSL les évaluer
+  lui-même. N'affecte que les constructions shell sensibles à l'expansion
+  (`$?`, `$(...)`, `` `...` ``) — la sortie texte normale d'une commande
+  (ce qu'on lit pour juger d'un succès/échec dans ce projet la plupart du
+  temps) n'est pas affectée par ce piège.
+
 - **GTK sous WSLg rend en Wayland natif par défaut, invisible pour les outils
   X11** (`scrot`, `xwininfo`, et le pilote `WebKitWebDriver` utilisé pour les
   tests E2E). La fenêtre existe et le process tourne, mais n'apparaît dans
