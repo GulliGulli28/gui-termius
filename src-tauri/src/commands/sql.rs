@@ -2,7 +2,7 @@ use crate::state::AppState;
 use serde::Deserialize;
 use tauri::State;
 use termius_core::model::{GroupId, SqlConnection, SqlConnectionId, SqlEngine, Workspace};
-use termius_core::sql::{self, AnyPool, ColumnInfo, QueryResult, TableInfo};
+use termius_core::sql::{self, ColumnInfo, QueryResult, SqlPool, TableInfo};
 use termius_core::store;
 use termius_core::sync_ext::MutexExt;
 use termius_core::vault::{self, SecretKind};
@@ -115,37 +115,37 @@ pub async fn close_sql_session(state: State<'_, AppState>, session_id: String) -
     Ok(())
 }
 
-/// Clones the pool (cheap — `AnyPool` is `Arc`-based) and its engine out of
+/// Clones the pool (cheap — each `SqlPool` variant is `Arc`-based) out of
 /// the session map under the lock, then drops the lock before returning —
 /// every `list_sql_*`/`run_sql_query` command below calls this first so the
 /// actual query `.await`s never happen while holding the
 /// (non-`Send`-across-`.await`) `std::sync::MutexGuard`.
-fn pool_and_engine(state: &AppState, session_id: &str) -> Result<(AnyPool, SqlEngine), String> {
+fn session_pool(state: &AppState, session_id: &str) -> Result<SqlPool, String> {
     let sessions = state.sql_sessions.lock_recover();
     let session = sessions.get(session_id).ok_or_else(|| "session SQL inconnue ou fermée".to_string())?;
-    Ok((session.pool.clone(), session.engine))
+    Ok(session.pool.clone())
 }
 
 #[tauri::command]
 pub async fn list_sql_schemas(state: State<'_, AppState>, session_id: String) -> Result<Vec<String>, String> {
-    let (pool, engine) = pool_and_engine(&state, &session_id)?;
-    sql::list_schemas(&pool, engine).await.map_err(|e| e.to_string())
+    let pool = session_pool(&state, &session_id)?;
+    sql::list_schemas(&pool).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn list_sql_tables(state: State<'_, AppState>, session_id: String, schema: String) -> Result<Vec<TableInfo>, String> {
-    let (pool, engine) = pool_and_engine(&state, &session_id)?;
-    sql::list_tables(&pool, engine, &schema).await.map_err(|e| e.to_string())
+    let pool = session_pool(&state, &session_id)?;
+    sql::list_tables(&pool, &schema).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn list_sql_columns(state: State<'_, AppState>, session_id: String, schema: String, table: String) -> Result<Vec<ColumnInfo>, String> {
-    let (pool, engine) = pool_and_engine(&state, &session_id)?;
-    sql::list_columns(&pool, engine, &schema, &table).await.map_err(|e| e.to_string())
+    let pool = session_pool(&state, &session_id)?;
+    sql::list_columns(&pool, &schema, &table).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn run_sql_query(state: State<'_, AppState>, session_id: String, sql: String) -> Result<QueryResult, String> {
-    let (pool, _engine) = pool_and_engine(&state, &session_id)?;
+    let pool = session_pool(&state, &session_id)?;
     sql::execute_query(&pool, &sql).await.map_err(|e| e.to_string())
 }

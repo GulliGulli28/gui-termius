@@ -57,7 +57,14 @@ k8s-openapi = { version = "0.24", features = ["latest"] }
 # `sql`: MySQL/PostgreSQL client — checked against the RDP/ecdsa saga before
 # adding (see CLAUDE.md's "Pourquoi un processus RDP séparé"), resolves
 # cleanly alongside russh/bollard/reqwest/kube, no separate workspace needed.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "postgres", "mysql", "chrono", "uuid"] }
+# Native `postgres`/`mysql` pools, not the generic `any` driver: `any` only
+# decodes a closed 9-variant type set (bool/int widths/float widths/text/
+# blob/null) — real tables routinely have NUMERIC/TIMESTAMP(TZ)/UUID/JSON(B)
+# columns, none of which fit that set, so `any` hard-fails the entire query
+# the moment one appears (verified against a real Postgres server, not just
+# reasoned about). `rust_decimal`/`json` add decode support for NUMERIC (as
+# an exact string — `f64` would silently round monetary amounts) and JSON(B).
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "chrono", "uuid", "json", "rust_decimal"] }
 # Already resolved transitively (reqwest/sqlx) — declared directly since
 # `sql::build_url` uses its setters (percent-encoding credentials safely,
 # see that function's doc comment) rather than just consuming it.
@@ -70,3 +77,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[example]]
 name = "docker_ssh_debug"
+
+[[example]]
+name = "sql_wsl_smoke"

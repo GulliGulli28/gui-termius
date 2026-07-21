@@ -1307,3 +1307,85 @@ l'équivalent MySQL) ; (3) le tunnel SSH éphémère bout-en-bout avec une
 vraie base de données au bout (le mécanisme de port forward lui-même est
 testé pour de vrai avec un service echo, mais jamais avec un vrai serveur
 SQL en bout de chaîne).
+
+## Client SQL : `sqlx::Any` remplacé par des pools natifs, après un vrai test contre BPCE_DEV (2026-07-21)
+
+Le point (1) ci-dessus était fondé — l'utilisateur a testé contre une vraie
+connexion PostgreSQL de prod (`BPCE_DEV`, tunnelée via un hôte SSH) dès la
+session suivante, et deux bugs réels sont apparus, dans cet ordre.
+
+### Bug 1 — `information_schema.schemata.schema_name` : type `NAME`, pas `TEXT`
+
+Premier symptôme : `open_sql_session` réussissait (connexion + tunnel + auth
+OK), mais `list_sql_schemas` échouait juste après avec `error in Any driver
+mapping: Any driver does not support the Postgres type PgTypeInfo(Name)` —
+et `SqlTab.tsx` chaînait les deux appels sous un seul `.catch`, donc l'UI
+affichait « Impossible de se connecter » alors que la connexion elle-même
+marchait. `schema_name`/`table_name`/`column_name` dans `information_schema`
+sont du type `sql_identifier`, un domaine basé sur le type interne `NAME` —
+pas `TEXT`. Fix ponctuel (temporaire, remplacé par le bug 2 ci-dessous) :
+caster ces trois colonnes en `::text` dans les requêtes d'introspection.
+
+### Bug 2 — plus grave : `NUMERIC`/`TIMESTAMP(TZ)`/`UUID`/`JSON(B)` cassent `execute_query` en entier
+
+Pour aller plus loin, un vrai PostgreSQL de test a été monté sur le WSL de
+l'utilisateur (`sudo apt-get install postgresql`, tunnelé via son hôte SSH
+`ubuntu` déjà enregistré dans l'app — voir `core/examples/sql_wsl_smoke.rs`
+ci-dessous) avec des tables représentatives (montants `NUMERIC`, dates
+`TIMESTAMP`/`TIMESTAMPTZ`, `UUID`, `JSONB`, tableau `text[]`). Résultat :
+**toute colonne d'un de ces types fait échouer `execute_query` en entier**,
+pas seulement décoder à `null` comme documenté. Cause : `AnyTypeInfoKind`
+(le jeu de types que le pilote `Any` sait produire) est fermé à 9 variantes
+(`Null`/`Bool`/`SmallInt`/`Integer`/`BigInt`/`Real`/`Double`/`Text`/`Blob`) —
+`NUMERIC`/`TIMESTAMP(TZ)`/`UUID`/`JSON(B)` n'y ont *aucune* représentation.
+La conversion de la ligne brute vers `AnyRow` échoue donc avant même que
+`decode_value` tourne — ce n'est pas le cas « décodage cellule par cellule
+qui échoue » que le fallback `null` de la session précédente avait anticipé
+et pouvait couvrir, c'est un échec plus tôt dans le pipeline qui emporte
+toute la requête. Sévère en pratique : `NUMERIC`/`TIMESTAMP` sont parmi les
+types de colonnes les plus courants qui existent (montants, dates) — la
+session précédente avait identifié ce point comme le plus risqué à valider
+en premier, mais n'avait pas anticipé qu'un type puisse être *absent* du
+jeu fermé plutôt que simplement mal décodé pour une valeur donnée.
+
+**Fix** : `core::sql::SqlPool`, un enum (`Postgres(PgPool)`/`Mysql(MySqlPool)`)
+remplaçant `AnyPool` partout — plus de driver générique. `decode_pg_value`/
+`decode_mysql_value` décodent en essayant des types Rust candidats dans
+l'ordre, gardant le premier qui type-check *et* décode (`NUMERIC` →
+`rust_decimal::Decimal` → **string**, jamais `f64` : un montant arrondi
+silencieusement par une conversion flottante serait pire qu'affiché en
+texte ; `TIMESTAMP(TZ)`/`DATE`/`TIME` → `chrono`, en string ISO ; `UUID` →
+string ; `JSON(B)` → `serde_json::Value` natif, pas re-stringifié).
+
+**Piège MySQL découvert en lisant les sources vendues** (même discipline
+que pour PostgreSQL en son temps — `sqlx-mysql-0.8.6/src/types/
+{bytes,str,json,bool}.rs`) : contrairement à PostgreSQL où chaque type a un
+OID exact et les vérifications de compatibilité ne se chevauchent jamais,
+MySQL vérifie par *famille* de type protocole. `Vec<u8>` accepte n'importe
+quelle colonne texte-ou-blob **qu'elle soit binaire ou non** ; `String`
+exige en plus l'absence du flag binaire. Essayer `Vec<u8>` avant `String`
+aurait donc affiché **toute colonne texte ordinaire en hexadécimal**.
+Ordre retenu : `String` avant `Vec<u8>` (ne laisse que les vrais blobs
+binaires atteindre `Vec<u8>`), `Json`/`JsonValue` après `String` (son check
+accepte aussi tout ce qui est `String`/`Vec<u8>`-compatible, donc placé
+après il n'attrape plus que les vraies colonnes `JSON`). Le cas `bool` est
+volontairement **jamais tenté** côté MySQL : sa vérification de
+compatibilité accepte n'importe quelle colonne entière (MySQL n'a pas de
+vrai type booléen, `BOOLEAN` est un alias de `TINYINT(1)`, et le check ne
+vérifie pas cette largeur `(1)`) — un vrai `INT`/`BIGINT` s'y serait laissé
+décoder à tort en `true`/`false`.
+
+### Outil de test réutilisable : `core/examples/sql_wsl_smoke.rs`
+
+Sur le modèle de `docker_ssh_debug.rs` (déjà existant) : charge le vrai
+`workspace.json`, trouve un hôte SSH enregistré par label (argv[1]), construit
+une `SqlConnection` éphémère tunnelée à travers lui, stocke son mot de passe
+dans le trousseau réel juste le temps du test puis le supprime. Lancé en
+natif Windows, il lit le vrai mot de passe SSH de l'hôte depuis le
+Gestionnaire d'identifiants Windows via `vault::load` — exactement comme le
+ferait l'app, sans que l'agent voie jamais aucun secret. C'est ce qui a
+permis de dérouler tout le chemin (tunnel → connexion → introspection →
+requête) contre un vrai serveur sans avoir à automatiser la fenêtre
+WebView2 (aucun outil de ce genre disponible). À garder pour la prochaine
+fois qu'un point du client SQL doit être vérifié en conditions réelles —
+usage : `cargo run --example sql_wsl_smoke -- <label-hôte-ssh> <mot-de-passe-pg> <base>`.

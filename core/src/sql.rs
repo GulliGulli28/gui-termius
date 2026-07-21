@@ -22,10 +22,33 @@
 //! function/tree level because they're the same *browsing granularity* for
 //! each engine, not because they're the same concept.
 //!
-//! **Known limitations, accepted for a first version** (none of this has
-//! been exercised against a real MySQL/PostgreSQL server — no server
-//! reachable in this dev environment, same caveat as RDP/K8s/Docker-via-SSH
-//! before this):
+//! **[`SqlPool`], not `sqlx::Any` — verified against a real server, not just
+//! reasoned about.** An earlier version of this module used `sqlx`'s
+//! generic `Any` driver so [`list_schemas`]/[`list_tables`]/[`list_columns`]/
+//! [`execute_query`] wouldn't need an engine-specific branch. That driver
+//! only decodes a **closed 9-variant type set**
+//! (`Null`/`Bool`/`SmallInt`/`Integer`/`BigInt`/`Real`/`Double`/`Text`/
+//! `Blob` — verified in the vendored `sqlx-core-0.8.6/src/any/{type_info,
+//! row,value}.rs`), and normalizes every backend's native types down to it.
+//! Against a real PostgreSQL server this broke immediately: `schema_name`/
+//! `table_name`/`column_name` are `sql_identifier` (a domain over the
+//! internal `NAME` type, not `TEXT`), so introspection failed outright, and
+//! `execute_query` hard-failed on *any* table with a `NUMERIC`/
+//! `TIMESTAMP(TZ)`/`UUID`/`JSON(B)` column — i.e. most real tables — because
+//! those types have no representation in the 9-variant set at all. This
+//! isn't the "a decode that still fails falls back to JSON `null`" case the
+//! previous version's decoder was built to tolerate: the row itself can't
+//! be converted to `Any`'s row type in the first place, so the failure
+//! surfaces before any per-cell decoding even runs, and takes out the whole
+//! query. [`SqlPool`] instead wraps the real per-engine pool
+//! (`sqlx::PgPool`/`sqlx::MySqlPool`), decoded by [`decode_pg_value`]/
+//! [`decode_mysql_value`] against the actual type each backend reports.
+//! Exercised end-to-end against a real PostgreSQL server (tunnelled through
+//! a real SSH host, `core/examples/sql_wsl_smoke.rs`) — MySQL's decode path
+//! mirrors the same verified-compatibility approach but has not had the
+//! same live test yet.
+//!
+//! **Other known limitations, accepted for a first version:**
 //! - No primary-key/index information in [`list_columns`] — name/type/
 //!   nullability only, to keep the introspection query itself simple and
 //!   fully portable (the `information_schema.columns` shape used here is
@@ -37,22 +60,26 @@
 //!   already treats "small/bounded" vs. "hot path" data going to the
 //!   frontend (`docs/dev-history.md`'s RDP-frames section spells out that
 //!   threshold).
-
 use crate::model::{PortForward, PortForwardKind, SqlConnection, SqlEngine, Workspace};
 use crate::port_forward::{self, ActiveForward};
 use crate::ssh::{self, Connection};
 use crate::vault::{self, SecretKind};
 use futures_util::TryStreamExt;
 use serde::Serialize;
-use sqlx::any::{AnyPoolOptions, AnyTypeInfoKind};
+use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
+use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use sqlx::types::{Decimal, Uuid};
 use sqlx::{Column, Row};
 use std::sync::Arc;
 
-// Re-exported so `src-tauri` never needs `sqlx` as a direct dependency —
-// same convention already followed for `bollard`/`kube` (their types are
-// only ever named through `core`'s own wrappers, never directly in
-// `src-tauri`, see e.g. `state.rs`'s `Pane` doc comment).
-pub use sqlx::AnyPool;
+/// The live pool behind a [`SqlSession`] — see this module's doc comment for
+/// why this is a real per-engine pool rather than `sqlx::AnyPool`.
+#[derive(Clone)]
+pub enum SqlPool {
+    Postgres(PgPool),
+    Mysql(MySqlPool),
+}
 
 /// A live SQL connection: the pool, plus — when tunnelled — the SSH
 /// connection and forward keeping the tunnel open for as long as the pool
@@ -62,19 +89,16 @@ pub use sqlx::AnyPool;
 /// be called explicitly — exactly like `commands::forward::stop_forward`
 /// already has to for a persisted tunnel.
 pub struct SqlSession {
-    pub pool: AnyPool,
-    /// Carried alongside the pool so the Tauri command layer can pick the
-    /// right introspection SQL (see `list_schemas`/`list_tables`/
-    /// `list_columns`) without re-reading the `SqlConnection` back out of
-    /// the workspace, which may have been edited or deleted since this
-    /// session was opened.
-    pub engine: SqlEngine,
+    pub pool: SqlPool,
     tunnel: Option<(Arc<Connection>, ActiveForward)>,
 }
 
 impl SqlSession {
     pub async fn close(self) {
-        self.pool.close().await;
+        match self.pool {
+            SqlPool::Postgres(pool) => pool.close().await,
+            SqlPool::Mysql(pool) => pool.close().await,
+        }
         if let Some((connection, active)) = self.tunnel {
             active.stop(&connection).await;
         }
@@ -113,8 +137,6 @@ fn build_url(engine: SqlEngine, host: &str, port: u16, username: &str, password:
 /// `ActiveForward::bound_addr`) and lives only inside the returned
 /// `SqlSession`, torn down by `SqlSession::close`.
 pub async fn connect(workspace: &Workspace, conn: &SqlConnection) -> anyhow::Result<SqlSession> {
-    sqlx::any::install_default_drivers();
-
     let password = vault::load(conn.id, SecretKind::SqlPassword)?;
 
     let (dial_host, dial_port, tunnel) = match conn.tunnel_host_id {
@@ -139,7 +161,11 @@ pub async fn connect(workspace: &Workspace, conn: &SqlConnection) -> anyhow::Res
     };
 
     let url = build_url(conn.engine, &dial_host, dial_port, &conn.username, password.as_deref(), conn.database.as_deref())?;
-    let pool = match AnyPoolOptions::new().max_connections(4).connect(url.as_str()).await {
+    let connected = match conn.engine {
+        SqlEngine::Postgres => PgPoolOptions::new().max_connections(4).connect(url.as_str()).await.map(SqlPool::Postgres),
+        SqlEngine::Mysql => MySqlPoolOptions::new().max_connections(4).connect(url.as_str()).await.map(SqlPool::Mysql),
+    };
+    let pool = match connected {
         Ok(pool) => pool,
         Err(e) => {
             // The pool never opened — nothing to close, but the tunnel (if
@@ -152,7 +178,7 @@ pub async fn connect(workspace: &Workspace, conn: &SqlConnection) -> anyhow::Res
         }
     };
 
-    Ok(SqlSession { pool, engine: conn.engine, tunnel })
+    Ok(SqlSession { pool, tunnel })
 }
 
 const MYSQL_SYSTEM_SCHEMAS: [&str; 4] = ["information_schema", "performance_schema", "mysql", "sys"];
@@ -162,26 +188,31 @@ const MYSQL_SYSTEM_SCHEMAS: [&str; 4] = ["information_schema", "performance_sche
 /// PostgreSQL schemas share this one function despite not being the same
 /// concept.
 ///
-/// This and the three functions below take `&AnyPool` rather than
-/// `&SqlSession` — `AnyPool` clones cheaply (it's `Arc`-based internally,
-/// like every sqlx pool type), so the Tauri command layer can clone it out
-/// of `AppState.sql_sessions`'s `std::sync::Mutex` and drop the lock before
-/// awaiting, rather than holding a non-`Send` `MutexGuard` across `.await`.
-pub async fn list_schemas(pool: &AnyPool, engine: SqlEngine) -> anyhow::Result<Vec<String>> {
-    let sql = match engine {
-        SqlEngine::Mysql => "SHOW DATABASES",
-        SqlEngine::Postgres => {
-            "SELECT schema_name FROM information_schema.schemata \
-             WHERE schema_name NOT LIKE 'pg\\_%' AND schema_name <> 'information_schema' \
-             ORDER BY schema_name"
+/// This and the three functions below take `&SqlPool` rather than
+/// `&SqlSession` — `SqlPool` clones cheaply (each variant is `Arc`-based
+/// internally, like every sqlx pool type), so the Tauri command layer can
+/// clone it out of `AppState.sql_sessions`'s `std::sync::Mutex` and drop the
+/// lock before awaiting, rather than holding a non-`Send` `MutexGuard`
+/// across `.await`.
+pub async fn list_schemas(pool: &SqlPool) -> anyhow::Result<Vec<String>> {
+    match pool {
+        SqlPool::Mysql(pool) => {
+            let rows = sqlx::query("SHOW DATABASES").fetch_all(pool).await?;
+            let mut names: Vec<String> = rows.iter().filter_map(|r| r.try_get::<String, _>(0).ok()).collect();
+            names.retain(|n| !MYSQL_SYSTEM_SCHEMAS.contains(&n.as_str()));
+            Ok(names)
         }
-    };
-    let rows = sqlx::query(sql).fetch_all(pool).await?;
-    let mut names: Vec<String> = rows.iter().filter_map(|r| r.try_get::<String, _>(0).ok()).collect();
-    if engine == SqlEngine::Mysql {
-        names.retain(|n| !MYSQL_SYSTEM_SCHEMAS.contains(&n.as_str()));
+        SqlPool::Postgres(pool) => {
+            let rows = sqlx::query(
+                "SELECT schema_name FROM information_schema.schemata \
+                 WHERE schema_name NOT LIKE 'pg\\_%' AND schema_name <> 'information_schema' \
+                 ORDER BY schema_name",
+            )
+            .fetch_all(pool)
+            .await?;
+            Ok(rows.iter().filter_map(|r| r.try_get::<String, _>(0).ok()).collect())
+        }
     }
-    Ok(names)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -193,19 +224,32 @@ pub struct TableInfo {
     pub kind: String,
 }
 
-pub async fn list_tables(pool: &AnyPool, engine: SqlEngine, schema: &str) -> anyhow::Result<Vec<TableInfo>> {
-    let sql = match engine {
-        SqlEngine::Mysql => "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ? ORDER BY table_name",
-        SqlEngine::Postgres => "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name",
+fn table_kind(table_type: &str) -> String {
+    if table_type.eq_ignore_ascii_case("VIEW") {
+        "view".to_string()
+    } else {
+        "table".to_string()
+    }
+}
+
+pub async fn list_tables(pool: &SqlPool, schema: &str) -> anyhow::Result<Vec<TableInfo>> {
+    let tables = match pool {
+        SqlPool::Mysql(pool) => sqlx::query("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = ? ORDER BY table_name")
+            .bind(schema)
+            .fetch_all(pool)
+            .await?
+            .iter()
+            .map(|r| TableInfo { name: r.try_get(0).unwrap_or_default(), kind: table_kind(&r.try_get::<String, _>(1).unwrap_or_default()) })
+            .collect(),
+        SqlPool::Postgres(pool) => sqlx::query("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name")
+            .bind(schema)
+            .fetch_all(pool)
+            .await?
+            .iter()
+            .map(|r| TableInfo { name: r.try_get(0).unwrap_or_default(), kind: table_kind(&r.try_get::<String, _>(1).unwrap_or_default()) })
+            .collect(),
     };
-    let rows = sqlx::query(sql).bind(schema).fetch_all(pool).await?;
-    Ok(rows
-        .iter()
-        .map(|r| TableInfo {
-            name: r.try_get(0).unwrap_or_default(),
-            kind: if r.try_get::<String, _>(1).unwrap_or_default().eq_ignore_ascii_case("VIEW") { "view".to_string() } else { "table".to_string() },
-        })
-        .collect())
+    Ok(tables)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -216,26 +260,34 @@ pub struct ColumnInfo {
     pub nullable: bool,
 }
 
-pub async fn list_columns(pool: &AnyPool, engine: SqlEngine, schema: &str, table: &str) -> anyhow::Result<Vec<ColumnInfo>> {
-    let sql = match engine {
-        SqlEngine::Mysql => {
-            "SELECT column_name, data_type, is_nullable FROM information_schema.columns \
-             WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position"
+fn column_info(name: String, data_type: String, is_nullable: &str) -> ColumnInfo {
+    ColumnInfo { name, data_type, nullable: is_nullable.eq_ignore_ascii_case("YES") }
+}
+
+pub async fn list_columns(pool: &SqlPool, schema: &str, table: &str) -> anyhow::Result<Vec<ColumnInfo>> {
+    let columns = match pool {
+        SqlPool::Mysql(pool) => {
+            sqlx::query("SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position")
+                .bind(schema)
+                .bind(table)
+                .fetch_all(pool)
+                .await?
+                .iter()
+                .map(|r| column_info(r.try_get(0).unwrap_or_default(), r.try_get(1).unwrap_or_default(), &r.try_get::<String, _>(2).unwrap_or_default()))
+                .collect()
         }
-        SqlEngine::Postgres => {
-            "SELECT column_name, data_type, is_nullable FROM information_schema.columns \
-             WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position"
+        SqlPool::Postgres(pool) => {
+            sqlx::query("SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position")
+                .bind(schema)
+                .bind(table)
+                .fetch_all(pool)
+                .await?
+                .iter()
+                .map(|r| column_info(r.try_get(0).unwrap_or_default(), r.try_get(1).unwrap_or_default(), &r.try_get::<String, _>(2).unwrap_or_default()))
+                .collect()
         }
     };
-    let rows = sqlx::query(sql).bind(schema).bind(table).fetch_all(pool).await?;
-    Ok(rows
-        .iter()
-        .map(|r| ColumnInfo {
-            name: r.try_get(0).unwrap_or_default(),
-            data_type: r.try_get(1).unwrap_or_default(),
-            nullable: r.try_get::<String, _>(2).map(|s| s.eq_ignore_ascii_case("YES")).unwrap_or(true),
-        })
-        .collect())
+    Ok(columns)
 }
 
 /// Hard cap on rows returned by [`execute_query`] — enforced incrementally
@@ -261,55 +313,176 @@ pub struct QueryResult {
 /// there is no "N rows affected" count in `QueryResult` for those: getting
 /// that would need a separate `execute()` call, and calling both would run
 /// a mutating statement twice.
-pub async fn execute_query(pool: &AnyPool, sql: &str) -> anyhow::Result<QueryResult> {
-    let mut stream = sqlx::query(sql).fetch(pool);
-    let mut columns: Vec<String> = Vec::new();
-    let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
-    let mut truncated = false;
-    while let Some(row) = stream.try_next().await? {
-        if columns.is_empty() {
-            columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+pub async fn execute_query(pool: &SqlPool, sql: &str) -> anyhow::Result<QueryResult> {
+    match pool {
+        SqlPool::Postgres(pool) => {
+            let mut stream = sqlx::query(sql).fetch(pool);
+            let mut columns: Vec<String> = Vec::new();
+            let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+            let mut truncated = false;
+            while let Some(row) = stream.try_next().await? {
+                if columns.is_empty() {
+                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                }
+                if rows.len() >= MAX_RESULT_ROWS {
+                    truncated = true;
+                    break;
+                }
+                rows.push((0..row.columns().len()).map(|i| decode_pg_value(&row, i)).collect());
+            }
+            Ok(QueryResult { columns, rows, truncated })
         }
-        if rows.len() >= MAX_RESULT_ROWS {
-            truncated = true;
-            break;
+        SqlPool::Mysql(pool) => {
+            let mut stream = sqlx::query(sql).fetch(pool);
+            let mut columns: Vec<String> = Vec::new();
+            let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+            let mut truncated = false;
+            while let Some(row) = stream.try_next().await? {
+                if columns.is_empty() {
+                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                }
+                if rows.len() >= MAX_RESULT_ROWS {
+                    truncated = true;
+                    break;
+                }
+                rows.push((0..row.columns().len()).map(|i| decode_mysql_value(&row, i)).collect());
+            }
+            Ok(QueryResult { columns, rows, truncated })
         }
-        rows.push(decode_row(&row));
     }
-    Ok(QueryResult { columns, rows, truncated })
 }
 
-fn decode_row(row: &sqlx::any::AnyRow) -> Vec<serde_json::Value> {
-    (0..row.columns().len()).map(|i| decode_value(row, i)).collect()
+fn hex_encode(bytes: &[u8]) -> String {
+    format!("\\x{}", bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
 }
 
-/// Decodes one cell into a JSON value, branching on the column's declared
-/// type (`AnyTypeInfoKind` — a closed 9-variant set the `Any` driver
-/// normalizes every backend's native types down to, verified against the
-/// vendored `sqlx-core` source rather than assumed). `Option<T>`'s `Decode`
-/// impl already treats a NULL value as `None` regardless of declared
-/// column type, so NULLs fall out of this naturally. A decode that still
-/// fails (e.g. a value that doesn't actually fit the declared type) falls
-/// back to JSON `null` rather than erroring the whole query — losing one
-/// cell's value beats losing the entire result set.
-fn decode_value(row: &sqlx::any::AnyRow, i: usize) -> serde_json::Value {
-    use AnyTypeInfoKind::*;
-    match row.columns()[i].type_info().kind() {
-        Null => serde_json::Value::Null,
-        Bool => row.try_get::<Option<bool>, _>(i).ok().flatten().map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null),
-        SmallInt => row.try_get::<Option<i16>, _>(i).ok().flatten().map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
-        Integer => row.try_get::<Option<i32>, _>(i).ok().flatten().map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
-        BigInt => row.try_get::<Option<i64>, _>(i).ok().flatten().map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
-        Real => row.try_get::<Option<f32>, _>(i).ok().flatten().map(|v| serde_json::json!(v as f64)).unwrap_or(serde_json::Value::Null),
-        Double => row.try_get::<Option<f64>, _>(i).ok().flatten().map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
-        Text => row.try_get::<Option<String>, _>(i).ok().flatten().map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
-        Blob => row
-            .try_get::<Option<Vec<u8>>, _>(i)
-            .ok()
-            .flatten()
-            .map(|b| serde_json::Value::String(format!("\\x{}", b.iter().map(|byte| format!("{byte:02x}")).collect::<String>())))
-            .unwrap_or(serde_json::Value::Null),
+/// Decodes one PostgreSQL cell into a JSON value by trying candidate Rust
+/// types in order and keeping the first that both type-checks *and*
+/// decodes — safe because `sqlx`'s `Type::compatible` for PostgreSQL is
+/// checked against the column's exact OID (verified in
+/// `sqlx-postgres-0.8.6/src/types/{bool,str,bytes}.rs`: e.g. `bool` only
+/// matches the real `BOOL` oid, `Vec<u8>`/`String` only match `BYTEA`/
+/// text-family oids respectively, never both), so no two candidates here
+/// can both claim the same real column. A cell that still fails every
+/// candidate (an exotic type this function doesn't special-case, e.g.
+/// `MONEY` or a non-text array) falls back to JSON `null` rather than
+/// erroring the whole query — losing one cell's value beats losing the
+/// entire result set. `NUMERIC` decodes to a `Decimal` and is emitted as a
+/// string, not `f64`: a monetary amount silently rounded by float
+/// conversion is worse than one rendered as text.
+fn decode_pg_value(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
+    if let Ok(Some(v)) = row.try_get::<Option<bool>, _>(i) {
+        return serde_json::Value::Bool(v);
     }
+    if let Ok(Some(v)) = row.try_get::<Option<i16>, _>(i) {
+        return serde_json::json!(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<i32>, _>(i) {
+        return serde_json::json!(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(i) {
+        return serde_json::json!(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<f32>, _>(i) {
+        return serde_json::json!(v as f64);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(i) {
+        return serde_json::json!(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Decimal>, _>(i) {
+        return serde_json::Value::String(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Uuid>, _>(i) {
+        return serde_json::Value::String(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<DateTime<Utc>>, _>(i) {
+        return serde_json::Value::String(v.to_rfc3339());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<NaiveDateTime>, _>(i) {
+        return serde_json::Value::String(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<NaiveDate>, _>(i) {
+        return serde_json::Value::String(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<NaiveTime>, _>(i) {
+        return serde_json::Value::String(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<String>, _>(i) {
+        return serde_json::Value::String(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<serde_json::Value>, _>(i) {
+        return v;
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<u8>>, _>(i) {
+        return serde_json::Value::String(hex_encode(&v));
+    }
+    // Best-effort for arrays: only the common text-array case (e.g.
+    // `text[]`/`varchar[]`). Arrays of any other element type (int[],
+    // numeric[], ...) fall through to `null` below rather than growing this
+    // into a full per-element-type array decoder.
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<String>>, _>(i) {
+        return serde_json::Value::Array(v.into_iter().map(serde_json::Value::String).collect());
+    }
+    serde_json::Value::Null
+}
+
+/// Decodes one MySQL cell — same cascading-candidate approach as
+/// [`decode_pg_value`], but the candidate order matters *more* here:
+/// MySQL's `Type::compatible` (verified in `sqlx-mysql-0.8.6/src/types/
+/// {bytes,str,json,bool}.rs`) is based on the wire type *family*, not an
+/// exact match, and several checks overlap on purpose:
+/// - `Vec<u8>`'s check accepts any text-or-blob-family column regardless of
+///   the binary flag, while `String`'s check additionally requires the
+///   binary flag to be *absent*. Trying `Vec<u8>` first would render every
+///   ordinary text column as hex. `String` is tried first here so it claims
+///   all non-binary text columns before `Vec<u8>` ever sees them; only real
+///   binary blobs (which fail the `String` attempt) reach `Vec<u8>`.
+/// - MySQL's `Json<T>`/`JsonValue` check accepts a real `JSON` column *or*
+///   anything `String`/`Vec<u8>`-compatible. Tried after `String`, so it
+///   only ever actually reaches real `JSON` columns in practice.
+/// - `bool`'s check accepts *any* integer-family column (MySQL has no
+///   native boolean — `BOOLEAN` is an alias for `TINYINT(1)`, and the
+///   `compatible()` check doesn't verify the `(1)` width), so a genuine
+///   `INT`/`BIGINT` column would just as happily "decode" as a `bool`.
+///   Deliberately not attempted here at all: an ordinary integer shown as
+///   `0`/`1` is correct; a `TINYINT(1)` shown as `0`/`1` instead of `true`/
+///   `false` is an acceptable simplification, but a normal integer column
+///   silently rendered as a boolean would not be.
+fn decode_mysql_value(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Value {
+    if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(i) {
+        return serde_json::json!(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<u64>, _>(i) {
+        return serde_json::json!(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<f32>, _>(i) {
+        return serde_json::json!(v as f64);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(i) {
+        return serde_json::json!(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Decimal>, _>(i) {
+        return serde_json::Value::String(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<NaiveDateTime>, _>(i) {
+        return serde_json::Value::String(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<NaiveDate>, _>(i) {
+        return serde_json::Value::String(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<NaiveTime>, _>(i) {
+        return serde_json::Value::String(v.to_string());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<String>, _>(i) {
+        return serde_json::Value::String(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<serde_json::Value>, _>(i) {
+        return v;
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<u8>>, _>(i) {
+        return serde_json::Value::String(hex_encode(&v));
+    }
+    serde_json::Value::Null
 }
 
 #[cfg(test)]
