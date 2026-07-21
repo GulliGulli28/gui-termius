@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "../lib/api";
-import type { DockerContainer, Group, GroupId, Host, K8sPod, Workspace } from "../lib/types";
-import { parsePodPickerId, podPickerId } from "../lib/types";
+import type { Group, GroupId, Host, Workspace } from "../lib/types";
 import { HostIcon } from "./icons";
 import { hostKindMeta } from "../lib/hostKinds";
-import { ConnectionPickerModal } from "./ConnectionPickerModal";
 import { IconSearch, IconHosts, IconFolder, IconTransfer, IconChevronDown, IconChevronRight } from "./ui-icons";
+import { usePolledHostStat } from "../hooks/usePolledHostStat";
+import { useContainerPicker } from "../hooks/useContainerPicker";
 
 interface SftpPanelProps {
   workspace: Workspace;
@@ -15,46 +15,18 @@ interface SftpPanelProps {
 export function SftpPanel({ workspace, onOpenTransfer }: SftpPanelProps) {
   const [search, setSearch] = useState("");
   const [collapsed, setCollapsed] = useState<Set<GroupId>>(new Set());
-  const [hostStatus, setHostStatus] = useState<Record<string, boolean>>({});
+  // Unlike HostsPanel's equivalent poll, this one isn't filtered to SSH
+  // hosts only — kept as-is (pre-existing behavior, not changed here).
+  const hostStatus = usePolledHostStat(workspace.hosts, () => true, (h) => api.checkHostStatus(h.id), false);
+
   // Docker exec repurposes a saved host as a daemon entry point — opening a
   // transfer tab against one needs a live container picked first, same as
-  // `HostsPanel.tsx`'s `openDockerPicker`.
-  const [dockerPickerHost, setDockerPickerHost] = useState<Host | null>(null);
-  const [dockerContainers, setDockerContainers] = useState<DockerContainer[] | null>(null);
-  const [dockerPickerError, setDockerPickerError] = useState<string | null>(null);
-  const openDockerPicker = (host: Host) => {
-    setDockerPickerHost(host);
-    setDockerContainers(null);
-    setDockerPickerError(null);
-    api.listDockerContainers(host.id).then(setDockerContainers).catch((e) => setDockerPickerError(String(e)));
-  };
-
-  // Same idea for K8s exec — a pod/container has to be picked first.
-  const [k8sPickerHost, setK8sPickerHost] = useState<Host | null>(null);
-  const [k8sPods, setK8sPods] = useState<K8sPod[] | null>(null);
-  const [k8sPickerError, setK8sPickerError] = useState<string | null>(null);
-  const openK8sPicker = (host: Host) => {
-    setK8sPickerHost(host);
-    setK8sPods(null);
-    setK8sPickerError(null);
-    api.listK8sPods(host.id).then(setK8sPods).catch((e) => setK8sPickerError(String(e)));
-  };
-
-  const hostIdsKey = workspace.hosts.map((h) => h.id).join(",");
-  useEffect(() => {
-    let cancelled = false;
-    const poll = () => {
-      for (const host of workspace.hosts) {
-        api.checkHostStatus(host.id)
-          .then((online) => { if (!cancelled) setHostStatus((prev) => ({ ...prev, [host.id]: online })); })
-          .catch(() => { if (!cancelled) setHostStatus((prev) => ({ ...prev, [host.id]: false })); });
-      }
-    };
-    poll();
-    const interval = setInterval(poll, 30000);
-    return () => { cancelled = true; clearInterval(interval); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hostIdsKey]);
+  // `HostsPanel.tsx`'s `openDockerPicker`. Same idea for K8s exec, one level
+  // deeper (a pod, and if it has more than one container, which container).
+  const { openDockerPicker, openK8sPicker, pickerModal } = useContainerPicker(
+    (host, containerId) => onOpenTransfer(host, containerId),
+    (host, podName, containerName) => onOpenTransfer(host, undefined, podName, containerName),
+  );
 
   const query = search.trim().toLowerCase();
   // rdp hosts have no file-listing backend — SFTP-shaped browsing only
@@ -202,40 +174,7 @@ export function SftpPanel({ workspace, onOpenTransfer }: SftpPanelProps) {
         )}
       </div>
 
-      {dockerPickerHost && (
-        <ConnectionPickerModal
-          title={`Conteneurs Docker — ${dockerPickerHost.label}`}
-          loading={dockerContainers === null && !dockerPickerError}
-          error={dockerPickerError}
-          items={(dockerContainers ?? []).map((c) => ({ id: c.id, name: c.name || c.id.slice(0, 12), meta: `${c.image} · ${c.status}`, up: c.state === "running" }))}
-          onPick={(containerId) => { onOpenTransfer(dockerPickerHost, containerId); setDockerPickerHost(null); }}
-          onClose={() => setDockerPickerHost(null)}
-        />
-      )}
-
-      {k8sPickerHost && (
-        <ConnectionPickerModal
-          title={`Pods Kubernetes — ${k8sPickerHost.label}`}
-          loading={k8sPods === null && !k8sPickerError}
-          error={k8sPickerError}
-          items={(k8sPods ?? []).flatMap((pod) =>
-            pod.containers.length > 1
-              ? pod.containers.map((c) => ({
-                  id: podPickerId(pod.name, c),
-                  name: `${pod.name} › ${c}`,
-                  meta: `${pod.namespace} · ${pod.phase}`,
-                  up: pod.ready,
-                }))
-              : [{ id: podPickerId(pod.name), name: pod.name, meta: `${pod.namespace} · ${pod.phase}`, up: pod.ready }],
-          )}
-          onPick={(id) => {
-            const { podName, containerName } = parsePodPickerId(id);
-            onOpenTransfer(k8sPickerHost, undefined, podName, containerName);
-            setK8sPickerHost(null);
-          }}
-          onClose={() => setK8sPickerHost(null)}
-        />
-      )}
+      {pickerModal}
     </div>
   );
 }

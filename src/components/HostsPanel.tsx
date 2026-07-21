@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
-import type { DockerContainer, Group, GroupId, Host, HostId, K8sPod, Workspace } from "../lib/types";
-import { parsePodPickerId, podPickerId } from "../lib/types";
+import type { Group, GroupId, Host, HostId, Workspace } from "../lib/types";
 import { HostIcon } from "./icons";
 import { hostKindMeta } from "../lib/hostKinds";
 import { ramColor } from "../lib/facts";
 import { formatRelativeTime } from "../lib/format";
-import { ConnectionPickerModal } from "./ConnectionPickerModal";
+import { usePolledHostStat } from "../hooks/usePolledHostStat";
+import { useContainerPicker } from "../hooks/useContainerPicker";
 import {
   IconHosts, IconSearch, IconPlus, IconKeyboard, IconFlash,
   IconFolder, IconChevronDown, IconChevronRight,
@@ -105,97 +105,35 @@ export function HostsPanel({
   const [collapsed, setCollapsed] = useState<Set<GroupId>>(new Set());
   const [openMenuHostId, setOpenMenuHostId] = useState<HostId | null>(null);
   const [showAddMenu, setShowAddMenu] = useState(false);
-  const [hostStatus, setHostStatus] = useState<Record<string, boolean>>({});
-  const [containerCounts, setContainerCounts] = useState<Record<string, number | null>>({});
-  const [podCounts, setPodCounts] = useState<Record<string, number | null>>({});
   const [exportPendingHost, setExportPendingHost] = useState<Host | null>(null);
-  const [dockerPickerHost, setDockerPickerHost] = useState<Host | null>(null);
-  const [dockerContainers, setDockerContainers] = useState<DockerContainer[] | null>(null);
-  const [dockerPickerError, setDockerPickerError] = useState<string | null>(null);
-  const [k8sPickerHost, setK8sPickerHost] = useState<Host | null>(null);
-  const [k8sPods, setK8sPods] = useState<K8sPod[] | null>(null);
-  const [k8sPickerError, setK8sPickerError] = useState<string | null>(null);
+  const { openDockerPicker, openK8sPicker, pickerModal } = useContainerPicker(onConnectDocker, onConnectK8s);
 
-  const hostIdsKey = workspace.hosts.map((h) => h.id).join(",");
-  useEffect(() => {
-    let cancelled = false;
-    const poll = () => {
-      for (const host of workspace.hosts) {
-        if ((host.kind ?? "ssh") !== "ssh") continue;
-        api.checkHostStatus(host.id)
-          .then((online) => { if (!cancelled) setHostStatus((prev) => ({ ...prev, [host.id]: online })); })
-          .catch(() => { if (!cancelled) setHostStatus((prev) => ({ ...prev, [host.id]: false })); });
-      }
-    };
-    poll();
-    const interval = setInterval(poll, 30000);
-    return () => { cancelled = true; clearInterval(interval); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hostIdsKey]);
+  const hostStatus = usePolledHostStat(
+    workspace.hosts,
+    (h) => (h.kind ?? "ssh") === "ssh",
+    (h) => api.checkHostStatus(h.id),
+    false,
+  );
 
   // Live "N actifs" count shown right in the list for Docker hosts, so the
   // daemon's state is visible before ever opening the container picker.
-  useEffect(() => {
-    let cancelled = false;
-    const dockerHosts = workspace.hosts.filter((h) => h.kind === "dockerExec");
-    const poll = () => {
-      for (const host of dockerHosts) {
-        api.listDockerContainers(host.id)
-          .then((containers) => {
-            if (cancelled) return;
-            const running = containers.filter((c) => c.state === "running").length;
-            setContainerCounts((prev) => ({ ...prev, [host.id]: running }));
-          })
-          .catch(() => { if (!cancelled) setContainerCounts((prev) => ({ ...prev, [host.id]: null })); });
-      }
-    };
-    poll();
-    const interval = setInterval(poll, 30000);
-    return () => { cancelled = true; clearInterval(interval); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hostIdsKey]);
+  const containerCounts = usePolledHostStat(
+    workspace.hosts,
+    (h) => h.kind === "dockerExec",
+    async (h) => (await api.listDockerContainers(h.id)).filter((c) => c.state === "running").length,
+    null as number | null,
+  );
 
   // Live "N prêts" count for K8s hosts, same spirit as the Docker container
   // count above — visible before ever opening the pod picker. Best-effort:
   // an unreachable/misconfigured context simply contributes no count rather
   // than blocking the rest of the panel.
-  useEffect(() => {
-    let cancelled = false;
-    const k8sHosts = workspace.hosts.filter((h) => h.kind === "k8sExec");
-    const poll = () => {
-      for (const host of k8sHosts) {
-        api.listK8sPods(host.id)
-          .then((pods) => {
-            if (cancelled) return;
-            const ready = pods.filter((p) => p.ready).length;
-            setPodCounts((prev) => ({ ...prev, [host.id]: ready }));
-          })
-          .catch(() => { if (!cancelled) setPodCounts((prev) => ({ ...prev, [host.id]: null })); });
-      }
-    };
-    poll();
-    const interval = setInterval(poll, 30000);
-    return () => { cancelled = true; clearInterval(interval); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hostIdsKey]);
-
-  const openDockerPicker = (host: Host) => {
-    setDockerPickerHost(host);
-    setDockerContainers(null);
-    setDockerPickerError(null);
-    api.listDockerContainers(host.id)
-      .then(setDockerContainers)
-      .catch((e) => setDockerPickerError(String(e)));
-  };
-
-  const openK8sPicker = (host: Host) => {
-    setK8sPickerHost(host);
-    setK8sPods(null);
-    setK8sPickerError(null);
-    api.listK8sPods(host.id)
-      .then(setK8sPods)
-      .catch((e) => setK8sPickerError(String(e)));
-  };
+  const podCounts = usePolledHostStat(
+    workspace.hosts,
+    (h) => h.kind === "k8sExec",
+    async (h) => (await api.listK8sPods(h.id)).filter((p) => p.ready).length,
+    null as number | null,
+  );
 
   const handleConnect = (host: Host) => {
     const kind = host.kind ?? "ssh";
@@ -583,45 +521,7 @@ export function HostsPanel({
         </>
       )}
 
-      {dockerPickerHost && (
-        <ConnectionPickerModal
-          title={`Conteneurs Docker — ${dockerPickerHost.label}`}
-          loading={dockerContainers === null && !dockerPickerError}
-          error={dockerPickerError}
-          items={(dockerContainers ?? []).map((c) => ({
-            id: c.id,
-            name: c.name || c.id.slice(0, 12),
-            meta: `${c.image} · ${c.status}`,
-            up: c.state === "running",
-          }))}
-          onPick={(containerId) => { onConnectDocker(dockerPickerHost, containerId); setDockerPickerHost(null); }}
-          onClose={() => setDockerPickerHost(null)}
-        />
-      )}
-
-      {k8sPickerHost && (
-        <ConnectionPickerModal
-          title={`Pods Kubernetes — ${k8sPickerHost.label}`}
-          loading={k8sPods === null && !k8sPickerError}
-          error={k8sPickerError}
-          items={(k8sPods ?? []).flatMap((pod) =>
-            pod.containers.length > 1
-              ? pod.containers.map((c) => ({
-                  id: podPickerId(pod.name, c),
-                  name: `${pod.name} › ${c}`,
-                  meta: `${pod.namespace} · ${pod.phase}`,
-                  up: pod.ready,
-                }))
-              : [{ id: podPickerId(pod.name), name: pod.name, meta: `${pod.namespace} · ${pod.phase}`, up: pod.ready }],
-          )}
-          onPick={(id) => {
-            const { podName, containerName } = parsePodPickerId(id);
-            onConnectK8s(k8sPickerHost, podName, containerName);
-            setK8sPickerHost(null);
-          }}
-          onClose={() => setK8sPickerHost(null)}
-        />
-      )}
+      {pickerModal}
     </div>
   );
 }

@@ -3,13 +3,12 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, onTransferDone, onTransferError, onTransferProgress } from "../lib/api";
 import type { AppPreferences } from "../lib/preferences";
-import type { DockerContainer, Entry, Host, K8sPod, PaneListed, PaneOpened, PaneSource, PaneState, Workspace } from "../lib/types";
-import { parsePodPickerId, podPickerId } from "../lib/types";
+import type { Entry, Host, PaneListed, PaneOpened, PaneSource, PaneState, Workspace } from "../lib/types";
 import { IconFolder, IconEdit, IconTrash, IconShield, IconClose } from "./ui-icons";
 import { QuickEditModal } from "./QuickEditModal";
-import { ConnectionPickerModal } from "./ConnectionPickerModal";
 import { RdpTab } from "./RdpTab";
 import { useResizablePane } from "../hooks/useResizablePane";
+import { useContainerPicker } from "../hooks/useContainerPicker";
 
 type Side = "left" | "right";
 type PanesState = Record<Side, PaneState>;
@@ -546,28 +545,12 @@ function PaneView({ side, pane, workspace, fontSize, onNavigate, onSourceChange,
   // single connectable thing — picking it in the source selector below
   // needs a live-container step first, same as the sidebar's own connect
   // flow (`HostsPanel.tsx`'s `openDockerPicker`) and `SplitPane.tsx`'s
-  // second panel.
-  const [dockerPickerHost, setDockerPickerHost] = useState<Host | null>(null);
-  const [dockerContainers, setDockerContainers] = useState<DockerContainer[] | null>(null);
-  const [dockerPickerError, setDockerPickerError] = useState<string | null>(null);
-  const openDockerPicker = (host: Host) => {
-    setDockerPickerHost(host);
-    setDockerContainers(null);
-    setDockerPickerError(null);
-    api.listDockerContainers(host.id).then(setDockerContainers).catch((e) => setDockerPickerError(String(e)));
-  };
-
-  // Same idea for K8s exec — a pod (and, if it has more than one container,
-  // which container) has to be picked before a pane can open.
-  const [k8sPickerHost, setK8sPickerHost] = useState<Host | null>(null);
-  const [k8sPods, setK8sPods] = useState<K8sPod[] | null>(null);
-  const [k8sPickerError, setK8sPickerError] = useState<string | null>(null);
-  const openK8sPicker = (host: Host) => {
-    setK8sPickerHost(host);
-    setK8sPods(null);
-    setK8sPickerError(null);
-    api.listK8sPods(host.id).then(setK8sPods).catch((e) => setK8sPickerError(String(e)));
-  };
+  // second panel. Same idea for K8s exec, one level deeper (a pod, and if it
+  // has more than one container, which container).
+  const { dockerPickerHost, k8sPickerHost, openDockerPicker, openK8sPicker, pickerModal } = useContainerPicker(
+    (host, containerId) => onSourceChange(side, { kind: "docker", hostId: host.id, containerId }),
+    (host, podName, containerName) => onSourceChange(side, { kind: "k8s", hostId: host.id, podName, containerName }),
+  );
 
   const handleSort = (key: SortKey) => {
     if (key === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -661,40 +644,7 @@ function PaneView({ side, pane, workspace, fontSize, onNavigate, onSourceChange,
         {pane.status === "connecting" && <span className="text-xs text-[var(--c-text-muted)]">connexion…</span>}
       </div>
 
-      {dockerPickerHost && (
-        <ConnectionPickerModal
-          title={`Conteneurs Docker — ${dockerPickerHost.label}`}
-          loading={dockerContainers === null && !dockerPickerError}
-          error={dockerPickerError}
-          items={(dockerContainers ?? []).map((c) => ({ id: c.id, name: c.name || c.id.slice(0, 12), meta: `${c.image} · ${c.status}`, up: c.state === "running" }))}
-          onPick={(containerId) => { onSourceChange(side, { kind: "docker", hostId: dockerPickerHost.id, containerId }); setDockerPickerHost(null); }}
-          onClose={() => setDockerPickerHost(null)}
-        />
-      )}
-
-      {k8sPickerHost && (
-        <ConnectionPickerModal
-          title={`Pods Kubernetes — ${k8sPickerHost.label}`}
-          loading={k8sPods === null && !k8sPickerError}
-          error={k8sPickerError}
-          items={(k8sPods ?? []).flatMap((pod) =>
-            pod.containers.length > 1
-              ? pod.containers.map((c) => ({
-                  id: podPickerId(pod.name, c),
-                  name: `${pod.name} › ${c}`,
-                  meta: `${pod.namespace} · ${pod.phase}`,
-                  up: pod.ready,
-                }))
-              : [{ id: podPickerId(pod.name), name: pod.name, meta: `${pod.namespace} · ${pod.phase}`, up: pod.ready }],
-          )}
-          onPick={(id) => {
-            const { podName, containerName } = parsePodPickerId(id);
-            onSourceChange(side, { kind: "k8s", hostId: k8sPickerHost.id, podName, containerName });
-            setK8sPickerHost(null);
-          }}
-          onClose={() => setK8sPickerHost(null)}
-        />
-      )}
+      {pickerModal}
 
       {pane.status === "failed" && (
         <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-rose-300">
