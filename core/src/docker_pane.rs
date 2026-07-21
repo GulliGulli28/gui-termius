@@ -25,7 +25,7 @@
 //! local file into memory, not while it's actually in flight to the daemon).
 
 use crate::docker::exec_capture;
-use crate::remote_shell_pane::{LIST_SCRIPT, build_single_file_tar, extract_single_file, parse_listing, split_parent_and_name};
+use crate::remote_shell_pane::{LIST_SCRIPT, build_single_file_tar, extract_single_file, parse_listing, read_local_file_chunked, split_parent_and_name};
 use crate::sftp::{Entry, MAX_EDIT_BYTES, RemoteFileClient};
 use bollard::Docker;
 use bollard::query_parameters::{DownloadFromContainerOptionsBuilder, UploadToContainerOptionsBuilder};
@@ -176,23 +176,7 @@ impl RemoteFileClient for DockerPaneClient {
         cancel: &AtomicBool,
         on_progress: &mut (dyn FnMut(u64, u64) + Send),
     ) -> anyhow::Result<()> {
-        use tokio::io::AsyncReadExt;
-        const CHUNK_SIZE: usize = 256 * 1024;
-        let mut local_file = tokio::fs::File::open(local_path).await?;
-        let total = local_file.metadata().await?.len();
-        let mut content = Vec::with_capacity(total as usize);
-        let mut buf = vec![0u8; CHUNK_SIZE];
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                anyhow::bail!("transfert annulé");
-            }
-            let n = local_file.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            content.extend_from_slice(&buf[..n]);
-            on_progress(content.len() as u64, total);
-        }
+        let content = read_local_file_chunked(local_path, cancel, on_progress).await?;
         self.upload_bytes(remote_path, &content).await
     }
 }

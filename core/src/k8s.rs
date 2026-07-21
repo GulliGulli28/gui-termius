@@ -12,6 +12,7 @@ use crate::model::HostFacts;
 use crate::ssh::{ShellInput, ShellSession};
 use futures_util::SinkExt;
 use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Status;
 use kube::api::{Api, AttachParams, ListParams, TerminalSize};
 use kube::config::KubeConfigOptions;
 use kube::{Client, Config};
@@ -203,20 +204,94 @@ async fn exec_raw(
     stderr_res?;
 
     let status = status_fut.await;
-    let exit_code = match status.as_ref().and_then(|s| s.status.as_deref()) {
+    let exit_code = exit_code_from_status(status.as_ref());
+
+    let _ = attached.join().await;
+    Ok((exit_code, stdout, stderr))
+}
+
+/// Pulled out of `exec_raw` as a pure function purely so it's unit-testable
+/// without a live API server — see `exec_raw`'s doc comment for the
+/// `client-go` convention this implements. Never observed against a real
+/// cluster response, only against the vendored `k8s-openapi` struct
+/// definitions and hand-built fixtures below.
+fn exit_code_from_status(status: Option<&Status>) -> Option<i32> {
+    match status.and_then(|s| s.status.as_deref()) {
         Some("Success") => Some(0),
         Some("Failure") => status
-            .as_ref()
             .and_then(|s| s.details.as_ref())
             .and_then(|d| d.causes.as_ref())
             .and_then(|causes| causes.iter().find(|c| c.reason.as_deref() == Some("ExitCode")))
             .and_then(|c| c.message.as_deref())
             .and_then(|m| m.parse::<i32>().ok()),
         _ => None,
-    };
+    }
+}
 
+/// Like [`exec_capture`], but stops draining stdout (and bails) as soon as
+/// more than `cap_bytes` have arrived, rather than always reading to
+/// completion first — used by [`crate::k8s_pane`]'s size-capped downloads so
+/// a huge file doesn't have to be fully buffered in memory just to be
+/// rejected for being too big, mirroring `docker_pane`'s own incremental cap
+/// check against its streamed archive endpoint (`kube`'s `AttachedProcess`
+/// has no such stream to lean on — this reads stdout by hand instead of
+/// `read_to_end`, same primitive `open_exec`'s output-forwarding task above
+/// already uses). No stdin support: the only caller (`tar cf -` for a
+/// download) never needs it.
+pub(crate) async fn exec_capped(
+    client: &Client,
+    namespace: &str,
+    pod_name: &str,
+    container: Option<&str>,
+    cmd: Vec<String>,
+    cap_bytes: u64,
+) -> anyhow::Result<Vec<u8>> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let ap = attach_params(false, true, true, false, container);
+    let mut attached = pods.exec(pod_name, cmd, &ap).await?;
+
+    let mut stdout_reader = attached.stdout().ok_or_else(|| anyhow::anyhow!("stdout non attaché"))?;
+    let mut stderr_reader = attached.stderr().ok_or_else(|| anyhow::anyhow!("stderr non attaché"))?;
+    let status_fut = attached.take_status().ok_or_else(|| anyhow::anyhow!("statut déjà consommé"))?;
+
+    // Both stdout and stderr must still be drained concurrently, same reason
+    // as `exec_raw`: the duplex buffers backing them are tiny (1 KiB), so
+    // leaving one undrained could stall the remote side mid-write on the
+    // other. stderr isn't expected to carry meaningful volume for a `tar cf
+    // -` download, so it's read to completion normally; only stdout bails
+    // early once it crosses the cap.
+    let mut stdout = Vec::new();
+    let mut buf = [0u8; 8192];
+    let stdout_fut = async {
+        loop {
+            let n = stdout_reader.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            stdout.extend_from_slice(&buf[..n]);
+            if stdout.len() as u64 > cap_bytes {
+                anyhow::bail!("fichier trop volumineux (> {} Mo)", cap_bytes / (1024 * 1024));
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    let mut stderr = Vec::new();
+    let (stdout_res, stderr_res) = tokio::join!(stdout_fut, stderr_reader.read_to_end(&mut stderr));
+    stderr_res?;
+    stdout_res?;
+
+    let status = status_fut.await;
+    let exit_code = exit_code_from_status(status.as_ref());
     let _ = attached.join().await;
-    Ok((exit_code, stdout, stderr))
+    if exit_code != Some(0) {
+        let detail = String::from_utf8_lossy(&stderr).trim().to_string();
+        anyhow::bail!(
+            "commande distante en échec (code {:?}){}",
+            exit_code,
+            if detail.is_empty() { String::new() } else { format!(" : {detail}") }
+        );
+    }
+    Ok(stdout)
 }
 
 /// Errors on a non-zero (or undetermined) exit code, with stderr folded into
@@ -266,4 +341,71 @@ pub async fn probe_pod_facts(client: &Client, namespace: &str, pod_name: &str, c
     let cmd = vec!["sh".to_string(), "-c".to_string(), crate::facts::PROBE.to_string()];
     let stdout = exec_capture(client, namespace, pod_name, container, cmd, None).await.ok()?;
     Some(crate::facts::parse_facts(&String::from_utf8_lossy(&stdout)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{StatusCause, StatusDetails};
+
+    fn failure_status(details: Option<StatusDetails>) -> Status {
+        Status { status: Some("Failure".to_string()), details, ..Default::default() }
+    }
+
+    fn exit_code_cause(code: &str) -> StatusCause {
+        StatusCause { reason: Some("ExitCode".to_string()), message: Some(code.to_string()), ..Default::default() }
+    }
+
+    #[test]
+    fn success_status_is_exit_code_zero_regardless_of_details() {
+        let status = Status { status: Some("Success".to_string()), ..Default::default() };
+        assert_eq!(exit_code_from_status(Some(&status)), Some(0));
+    }
+
+    #[test]
+    fn failure_status_extracts_the_exit_code_cause_message() {
+        let details = StatusDetails { causes: Some(vec![exit_code_cause("3")]), ..Default::default() };
+        let status = failure_status(Some(details));
+        assert_eq!(exit_code_from_status(Some(&status)), Some(3));
+    }
+
+    #[test]
+    fn failure_status_finds_the_exit_code_cause_among_several() {
+        let other = StatusCause { reason: Some("SomethingElse".to_string()), message: Some("ignored".to_string()), ..Default::default() };
+        let details = StatusDetails { causes: Some(vec![other, exit_code_cause("42")]), ..Default::default() };
+        let status = failure_status(Some(details));
+        assert_eq!(exit_code_from_status(Some(&status)), Some(42));
+    }
+
+    #[test]
+    fn failure_status_without_details_is_undetermined() {
+        let status = failure_status(None);
+        assert_eq!(exit_code_from_status(Some(&status)), None);
+    }
+
+    #[test]
+    fn failure_status_with_causes_but_no_exit_code_reason_is_undetermined() {
+        let other = StatusCause { reason: Some("SomethingElse".to_string()), message: Some("ignored".to_string()), ..Default::default() };
+        let details = StatusDetails { causes: Some(vec![other]), ..Default::default() };
+        let status = failure_status(Some(details));
+        assert_eq!(exit_code_from_status(Some(&status)), None);
+    }
+
+    #[test]
+    fn failure_status_with_a_non_numeric_exit_code_message_is_undetermined() {
+        let details = StatusDetails { causes: Some(vec![exit_code_cause("not-a-number")]), ..Default::default() };
+        let status = failure_status(Some(details));
+        assert_eq!(exit_code_from_status(Some(&status)), None);
+    }
+
+    #[test]
+    fn missing_status_object_is_undetermined() {
+        assert_eq!(exit_code_from_status(None), None);
+    }
+
+    #[test]
+    fn unrecognized_status_value_is_undetermined() {
+        let status = Status { status: Some("Unknown".to_string()), ..Default::default() };
+        assert_eq!(exit_code_from_status(Some(&status)), None);
+    }
 }

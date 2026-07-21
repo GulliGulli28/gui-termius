@@ -4,17 +4,22 @@
 //! endpoints, so file content also goes through `exec` (running `tar` inside
 //! the pod), the same approach `kubectl cp` itself uses client-side.
 //!
-//! **Known limitation, same spirit as `docker_pane`'s**: both directions
-//! buffer the whole file in memory — fine for ordinary config/source files,
-//! risky for multi-gigabyte ones. Unlike Docker's version, download progress
-//! here isn't even approximate: [`crate::k8s::exec_capture`] returns the
-//! whole captured tar archive at once (no partial-byte-count stream to
-//! report from), so `on_progress` only ever fires once, at completion.
-//! Upload progress remains approximate, same as Docker (reported while
-//! reading the local file into memory, not while it's actually in transit).
+//! **Known limitation, same spirit as `docker_pane`'s**: uploads and the
+//! uncapped `download()` (real file transfers, not the quick-edit path)
+//! still buffer the whole file in memory — fine for ordinary config/source
+//! files, risky for multi-gigabyte ones. Unlike Docker's version, download
+//! progress here isn't even approximate: [`crate::k8s::exec_capture`]
+//! returns the whole captured tar archive at once (no partial-byte-count
+//! stream to report from), so `on_progress` only ever fires once, at
+//! completion. Upload progress remains approximate, same as Docker
+//! (reported while reading the local file into memory, not while it's
+//! actually in transit). The size-*capped* download path (`read_to_string`,
+//! used for quick in-app editing) is the exception: [`exec_capped`] enforces
+//! the cap incrementally while draining stdout, so an oversized file is
+//! rejected without ever being fully buffered.
 
-use crate::k8s::exec_capture;
-use crate::remote_shell_pane::{LIST_SCRIPT, build_single_file_tar, extract_single_file, parse_listing, split_parent_and_name};
+use crate::k8s::{exec_capped, exec_capture};
+use crate::remote_shell_pane::{LIST_SCRIPT, build_single_file_tar, extract_single_file, parse_listing, read_local_file_chunked, split_parent_and_name};
 use crate::sftp::{Entry, MAX_EDIT_BYTES, RemoteFileClient};
 use kube::Client;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,17 +57,20 @@ impl K8sPaneClient {
     /// [`crate::remote_shell_pane::extract_single_file`] reads it
     /// identically either way. `parent`/`name` are passed as real argv
     /// entries to `tar`, never interpolated into a shell string.
+    ///
+    /// When `cap` is set, the size limit is enforced incrementally (via
+    /// [`exec_capped`]) rather than after buffering the whole archive —
+    /// otherwise a huge file would still have to be fully received (twice,
+    /// once here and once in `extract_single_file`) before being rejected
+    /// for being too large, defeating the point of capping at all.
     async fn download_tar_capped(&self, path: &str, cap: Option<u64>) -> anyhow::Result<Vec<u8>> {
         const TAR_OVERHEAD_MARGIN: u64 = 16 * 1024;
         let (parent, name) = split_parent_and_name(path)?;
         let cmd = vec!["tar".to_string(), "cf".to_string(), "-".to_string(), "-C".to_string(), parent, name];
-        let out = self.run(cmd, None).await?;
-        if let Some(cap) = cap
-            && out.len() as u64 > cap + TAR_OVERHEAD_MARGIN
-        {
-            anyhow::bail!("fichier trop volumineux (> {} Mo)", cap / (1024 * 1024));
+        match cap {
+            Some(cap) => exec_capped(&self.client, &self.namespace, &self.pod_name, self.container.as_deref(), cmd, cap + TAR_OVERHEAD_MARGIN).await,
+            None => self.run(cmd, None).await,
         }
-        Ok(out)
     }
 
     /// Uploads `content` by piping a single-entry tar archive as stdin to
@@ -153,23 +161,7 @@ impl RemoteFileClient for K8sPaneClient {
         cancel: &AtomicBool,
         on_progress: &mut (dyn FnMut(u64, u64) + Send),
     ) -> anyhow::Result<()> {
-        use tokio::io::AsyncReadExt;
-        const CHUNK_SIZE: usize = 256 * 1024;
-        let mut local_file = tokio::fs::File::open(local_path).await?;
-        let total = local_file.metadata().await?.len();
-        let mut content = Vec::with_capacity(total as usize);
-        let mut buf = vec![0u8; CHUNK_SIZE];
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                anyhow::bail!("transfert annulé");
-            }
-            let n = local_file.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            content.extend_from_slice(&buf[..n]);
-            on_progress(content.len() as u64, total);
-        }
+        let content = read_local_file_chunked(local_path, cancel, on_progress).await?;
         self.upload_bytes(remote_path, &content).await
     }
 }

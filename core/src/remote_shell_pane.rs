@@ -80,6 +80,39 @@ pub fn build_single_file_tar(name: &str, content: &[u8]) -> anyhow::Result<Vec<u
     Ok(builder.into_inner()?)
 }
 
+/// Reads `local_path` fully into memory in fixed-size chunks, checking
+/// `cancel` and reporting `on_progress(bytes_so_far, total)` after each one
+/// — the read side of both callers' `upload()` (Docker's Engine API upload
+/// endpoint, K8s's `tar xf -` over `exec`), neither of which can stream a
+/// local file straight into their own upload call, so both buffer it here
+/// first. Progress is therefore only approximate: it reflects reading the
+/// file locally, not how much has actually reached the container/pod.
+pub async fn read_local_file_chunked(
+    local_path: &std::path::Path,
+    cancel: &std::sync::atomic::AtomicBool,
+    on_progress: &mut (dyn FnMut(u64, u64) + Send),
+) -> anyhow::Result<Vec<u8>> {
+    use std::sync::atomic::Ordering;
+    use tokio::io::AsyncReadExt;
+    const CHUNK_SIZE: usize = 256 * 1024;
+    let mut local_file = tokio::fs::File::open(local_path).await?;
+    let total = local_file.metadata().await?.len();
+    let mut content = Vec::with_capacity(total as usize);
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            anyhow::bail!("transfert annulé");
+        }
+        let n = local_file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        content.extend_from_slice(&buf[..n]);
+        on_progress(content.len() as u64, total);
+    }
+    Ok(content)
+}
+
 /// Extracts the first regular-file entry's content from a tar archive —
 /// both callers' single-file download always produces an archive with
 /// exactly one meaningful entry (named by the requested path's basename,
