@@ -92,7 +92,11 @@ export const api = {
   listSqlSchemas: (sessionId: string) => invoke<string[]>("list_sql_schemas", { sessionId }),
   listSqlTables: (sessionId: string, schema: string) => invoke<TableInfo[]>("list_sql_tables", { sessionId, schema }),
   listSqlColumns: (sessionId: string, schema: string, table: string) => invoke<ColumnInfo[]>("list_sql_columns", { sessionId, schema, table }),
-  runSqlQuery: (sessionId: string, sql: string) => invoke<QueryResult>("run_sql_query", { sessionId, sql }),
+  /** `schema`: the tree's current selection, if any — applied as query
+   * context (`SET search_path`/`USE`) so an unqualified table name in `sql`
+   * resolves there instead of needing `schema.table`. See
+   * `core::sql::execute_query`'s doc comment. */
+  runSqlQuery: (sessionId: string, sql: string, schema?: string | null) => invoke<QueryResult>("run_sql_query", { sessionId, sql, schema: schema ?? null }),
 
   addPrivateKey: (name: string, path: string, passphrase: string | null) => invoke<Workspace>("add_private_key", { name, path, passphrase }),
   deletePrivateKey: (keyId: KeyId) => invoke<Workspace>("delete_private_key", { keyId }),

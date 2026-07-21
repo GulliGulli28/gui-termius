@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
 import { api } from "./lib/api";
-import type { GroupId, Host, HostId, TabMeta, VaultStatus, Workspace } from "./lib/types";
+import type { GroupId, Host, HostId, SqlConnection, TabMeta, VaultStatus, Workspace } from "./lib/types";
 import { Sidebar, type SidebarPanelKind } from "./components/Sidebar";
 import { HostForm } from "./components/HostForm";
 import { TabBar } from "./components/TabBar";
@@ -24,6 +24,7 @@ const SqlTab = lazy(() => import("./components/SqlTab").then((m) => ({ default: 
 import { type AppPreferences, type UiAccent, ACCENT_COLORS, BG_THEMES, loadPreferences, savePreferences } from "./lib/preferences";
 import { SplitPane } from "./components/SplitPane";
 import { GroupForm, type GroupFormData } from "./components/GroupForm";
+import { SqlConnectionForm } from "./components/SqlConnectionForm";
 import { IconTerminal, IconClose } from "./components/ui-icons";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { SnippetPicker } from "./components/SnippetPicker";
@@ -41,6 +42,7 @@ export default function App() {
   const [sidebarPanel, setSidebarPanel] = useState<SidebarPanelKind>("hosts");
   const [editingHost, setEditingHost] = useState<Host | "new" | null>(null);
   const [editingGroup, setEditingGroup] = useState<GroupFormData | null>(null);
+  const [editingSqlConnection, setEditingSqlConnection] = useState<SqlConnection | "new" | null>(null);
   const [newHostDefaultGroupId, setNewHostDefaultGroupId] = useState<GroupId | null>(null);
   const {
     status,
@@ -281,7 +283,7 @@ export default function App() {
     );
   }
 
-  const showRightPanel = !!(editingHost || editingGroup);
+  const showRightPanel = !!(editingHost || editingGroup || editingSqlConnection);
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const activeHostId = activeTab && activeTab.kind !== "local-terminal" && activeTab.kind !== "fleet" && activeTab.kind !== "sql" ? activeTab.hostId : null;
 
@@ -384,12 +386,12 @@ export default function App() {
             onOpenTransfer={(host, dockerContainerId, k8sPodName, k8sContainerName) => openTab("transfer", host, dockerContainerId, k8sPodName, k8sContainerName)}
             onOpenLocalTerminal={(shell) => openLocalTerminal(undefined, shell)}
             onQuickSSH={(cmd) => openLocalTerminal(cmd)}
-            onNewHost={() => { setEditingHost("new"); setNewHostDefaultGroupId(null); setEditingGroup(null); }}
-            onEditHost={(host) => { setEditingHost(host); setEditingGroup(null); }}
-            onNewGroup={() => { setEditingGroup({ id: null, name: "", parentId: null, icon: null, color: null }); setEditingHost(null); }}
-            onNewHostInGroup={(groupId) => { setEditingHost("new"); setNewHostDefaultGroupId(groupId); setEditingGroup(null); }}
-            onNewGroupUnder={(parentId) => { setEditingGroup({ id: null, name: "", parentId, icon: null, color: null }); setEditingHost(null); }}
-            onEditGroup={(group) => { setEditingGroup({ id: group.id, name: group.name, parentId: group.parentId ?? null, icon: group.icon ?? null, color: group.color ?? null }); setEditingHost(null); }}
+            onNewHost={() => { setEditingHost("new"); setNewHostDefaultGroupId(null); setEditingGroup(null); setEditingSqlConnection(null); }}
+            onEditHost={(host) => { setEditingHost(host); setEditingGroup(null); setEditingSqlConnection(null); }}
+            onNewGroup={() => { setEditingGroup({ id: null, name: "", parentId: null, icon: null, color: null }); setEditingHost(null); setEditingSqlConnection(null); }}
+            onNewHostInGroup={(groupId) => { setEditingHost("new"); setNewHostDefaultGroupId(groupId); setEditingGroup(null); setEditingSqlConnection(null); }}
+            onNewGroupUnder={(parentId) => { setEditingGroup({ id: null, name: "", parentId, icon: null, color: null }); setEditingHost(null); setEditingSqlConnection(null); }}
+            onEditGroup={(group) => { setEditingGroup({ id: group.id, name: group.name, parentId: group.parentId ?? null, icon: group.icon ?? null, color: group.color ?? null }); setEditingHost(null); setEditingSqlConnection(null); }}
             onWorkspaceUpdate={refreshWorkspace}
             onAddSnippet={(name, command) => api.addSnippet(name, command).then(refreshWorkspace).catch((e) => reportError(String(e)))}
             onUpdateSnippet={(id, name, command) => api.updateSnippet(id, name, command).then(refreshWorkspace).catch((e) => reportError(String(e)))}
@@ -407,6 +409,8 @@ export default function App() {
             onDeleteKey={(id) => api.deletePrivateKey(id).then(refreshWorkspace).catch((e) => reportError(String(e)))}
             onRenameKey={(id, name) => api.renamePrivateKey(id, name).then(refreshWorkspace).catch((e) => reportError(String(e)))}
             onConnectSql={(conn) => openSql(conn)}
+            onNewSqlConnection={() => { setEditingSqlConnection("new"); setEditingHost(null); setEditingGroup(null); }}
+            onEditSqlConnection={(conn) => { setEditingSqlConnection(conn); setEditingHost(null); setEditingGroup(null); }}
             onError={reportError}
             preferences={preferences}
             onPreferencesChange={updatePreferences}
@@ -628,6 +632,23 @@ export default function App() {
                   .catch((e) => reportError(String(e)));
               } : undefined}
               onWorkspaceUpdate={refreshWorkspace}
+            />
+          )}
+          {editingSqlConnection && (
+            <SqlConnectionForm
+              workspace={workspace}
+              connection={editingSqlConnection === "new" ? null : editingSqlConnection}
+              onCancel={() => setEditingSqlConnection(null)}
+              onSave={(input) => {
+                api.saveSqlConnection(input)
+                  .then((ws) => { refreshWorkspace(ws); setEditingSqlConnection(null); })
+                  .catch((e) => reportError(String(e)));
+              }}
+              onDeleteConnection={editingSqlConnection !== "new" ? (id) => {
+                api.deleteSqlConnection(id)
+                  .then((ws) => { refreshWorkspace(ws); setEditingSqlConnection(null); })
+                  .catch((e) => reportError(String(e)));
+              } : undefined}
             />
           )}
         </div>

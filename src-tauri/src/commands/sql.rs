@@ -189,8 +189,11 @@ pub async fn list_sql_columns(state: State<'_, AppState>, session_id: String, sc
     sql::list_columns(&pool, &schema, &table).await.map_err(|e| e.to_string())
 }
 
+/// `schema`: the tree's current selection, if any — applied as query
+/// context (`SET search_path`/`USE`) so unqualified table names resolve
+/// there. See `sql::execute_query`'s doc comment.
 #[tauri::command]
-pub async fn run_sql_query(state: State<'_, AppState>, session_id: String, sql: String) -> Result<QueryResult, String> {
+pub async fn run_sql_query(state: State<'_, AppState>, session_id: String, sql: String, schema: Option<String>) -> Result<QueryResult, String> {
     let pool = session_pool(&state, &session_id)?;
-    sql::execute_query(&pool, &sql).await.map_err(|e| e.to_string())
+    sql::execute_query(&pool, schema.as_deref(), &sql).await.map_err(|e| e.to_string())
 }

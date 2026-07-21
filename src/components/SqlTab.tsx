@@ -36,19 +36,21 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
 
   // PostgreSQL-only: when the connection has no database configured,
   // `openSqlSession` returns `database: null` and the session is left on a
-  // bootstrap connection — `needsDatabasePick` gates the tree showing a
-  // database picker (via `listSqlDatabases`) instead of a schema tree until
-  // one is chosen (`switchSqlDatabase`, which reconnects through the same
-  // tunnel). MySQL never sets this: it lists every database up front
-  // regardless (see `core::sql`'s module doc comment).
-  const [needsDatabasePick, setNeedsDatabasePick] = useState(false);
+  // bootstrap connection — `multiDatabase` switches the tree's top level to
+  // a persistent database list (via `listSqlDatabases`) instead of a schema
+  // list. The list stays visible for the whole tab's lifetime (clicking one
+  // database doesn't hide the others): `activeDatabase` tracks whichever one
+  // the session is currently reconnected to (`switchSqlDatabase`, reusing
+  // the same tunnel), and only its entry has a schema tree expanded under
+  // it. MySQL never sets this: it lists every database up front regardless
+  // (see `core::sql`'s module doc comment).
+  const [multiDatabase, setMultiDatabase] = useState(false);
   const [databases, setDatabases] = useState<string[] | null>(null);
-  const [pickedDatabase, setPickedDatabase] = useState<string | null>(null);
+  const [activeDatabase, setActiveDatabase] = useState<string | null>(null);
 
   const [schemas, setSchemas] = useState<string[] | null>(null);
   const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set());
   const [tablesBySchema, setTablesBySchema] = useState<Record<string, TableInfo[]>>({});
-  const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
   const [columnsByTable, setColumnsByTable] = useState<Record<string, ColumnInfo[]>>({});
 
   const [selected, setSelected] = useState<Selected>(null);
@@ -70,7 +72,7 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
         sessionIdRef.current = sessionId;
         setStatus("connected");
         if (connection.engine === "postgres" && database === null) {
-          setNeedsDatabasePick(true);
+          setMultiDatabase(true);
           return api.listSqlDatabases(sessionId).then((d) => { if (!cancelled) setDatabases(d); });
         }
         return api.listSqlSchemas(sessionId).then((s) => { if (!cancelled) setSchemas(s); });
@@ -82,16 +84,23 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
     };
   }, [connection.id, connection.engine]);
 
-  const pickDatabase = (database: string) => {
-    if (!sessionIdRef.current) return;
+  // Re-scopes the session to a different database — a no-op if it's already
+  // the active one. The previous database's schema tree state is dropped
+  // (it belongs to a pool that's about to be closed server-side) so the
+  // schema-tree code below can stay exactly the same as the single-database
+  // case, just re-fetching under the newly active database.
+  const selectDatabase = (database: string) => {
+    if (database === activeDatabase || !sessionIdRef.current) return;
     const sessionId = sessionIdRef.current;
+    setActiveDatabase(database);
+    setSchemas(null);
+    setTablesBySchema({});
+    setColumnsByTable({});
+    setExpandedSchemas(new Set());
+    setSelected(null);
     api.switchSqlDatabase(sessionId, database)
       .then(() => api.listSqlSchemas(sessionId))
-      .then((s) => {
-        setPickedDatabase(database);
-        setNeedsDatabasePick(false);
-        setSchemas(s);
-      })
+      .then(setSchemas)
       .catch((e) => onError(String(e)));
   };
 
@@ -111,16 +120,13 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
     }
   };
 
-  const toggleTable = (schema: string, table: string) => {
+  // Selects a table for the "Structure" tab — no expand/collapse of its own
+  // (unlike a schema): its columns are shown in the dedicated Structure tab
+  // now, not previewed inline in the tree.
+  const selectTable = (schema: string, table: string) => {
     const key = `${schema}.${table}`;
     setSelected({ kind: "table", schema, table });
     setActiveSubTab("structure");
-    setExpandedTables((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
     if (!columnsByTable[key] && sessionIdRef.current) {
       api.listSqlColumns(sessionIdRef.current, schema, table)
         .then((columns) => setColumnsByTable((prev) => ({ ...prev, [key]: columns })))
@@ -128,8 +134,10 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
     }
   };
 
-  const insertSelect = (schema: string, table: string) => {
-    setQuery(`SELECT * FROM ${schema}.${table} LIMIT 100;`);
+  // Unqualified — `run()` below passes the clicked table's schema as query
+  // context, so this resolves without needing `schema.table`.
+  const insertSelect = (table: string) => {
+    setQuery(`SELECT * FROM ${table} LIMIT 100;`);
     setActiveSubTab("query");
   };
 
@@ -137,7 +145,7 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
     if (!sessionIdRef.current || !query.trim() || running) return;
     setRunning(true);
     setQueryError(null);
-    api.runSqlQuery(sessionIdRef.current, query)
+    api.runSqlQuery(sessionIdRef.current, query, selected?.schema ?? null)
       .then(setResult)
       .catch((e) => { setQueryError(String(e)); setResult(null); })
       .finally(() => setRunning(false));
@@ -157,99 +165,90 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
 
   const structureLabel = selected?.kind === "table" ? `Table : ${selected.table}` : selected?.kind === "schema" ? `Base : ${selected.schema}` : "Structure";
 
+  // The schema/table tree — shared as-is between the single-database case
+  // (top level) and the multi-database case (nested under whichever
+  // database is active, below).
+  const schemaTree = schemas === null ? (
+    <p className="p-2 text-xs text-[var(--c-text-muted)]">Chargement du schéma…</p>
+  ) : schemas.length === 0 ? (
+    <p className="p-2 text-xs text-[var(--c-text-muted)]">Aucune base/schéma visible</p>
+  ) : (
+    schemas.map((schema) => (
+      <div key={schema}>
+        <button
+          onClick={() => toggleSchema(schema)}
+          className={`flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-[13px] text-[var(--c-text-secondary)] hover:bg-white/5 ${
+            selected?.kind === "schema" && selected.schema === schema ? "bg-white/5" : ""
+          }`}
+        >
+          {expandedSchemas.has(schema) ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
+          <IconDatabase size={12} className="shrink-0 text-[var(--c-text-faint)]" />
+          <span className="min-w-0 flex-1 truncate">{schema}</span>
+        </button>
+        {expandedSchemas.has(schema) && (
+          <div className="ml-4 border-l border-[var(--c-border)] pl-2">
+            {!tablesBySchema[schema] ? (
+              <p className="px-1 py-1 text-[11px] text-[var(--c-text-muted)]">…</p>
+            ) : tablesBySchema[schema].length === 0 ? (
+              <p className="px-1 py-1 text-[11px] text-[var(--c-text-muted)]">Vide</p>
+            ) : (
+              tablesBySchema[schema].map((t) => (
+                <div key={`${schema}.${t.name}`} className="flex items-center gap-1">
+                  <button
+                    onClick={() => selectTable(schema, t.name)}
+                    className={`flex min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 py-1 text-left text-[12px] text-[var(--c-text-secondary)] hover:bg-white/5 ${
+                      selected?.kind === "table" && selected.schema === schema && selected.table === t.name ? "bg-white/5" : ""
+                    }`}
+                  >
+                    <IconFolder size={11} className="shrink-0 text-[var(--c-text-faint)]" />
+                    <span className="min-w-0 flex-1 truncate">{t.name}</span>
+                    {t.kind === "view" && <span className="shrink-0 text-[9px] text-[var(--c-text-faint)]">vue</span>}
+                  </button>
+                  <button
+                    onClick={() => insertSelect(t.name)}
+                    title="Insérer un SELECT dans l'éditeur"
+                    className="shrink-0 rounded px-1 text-[10px] text-[var(--c-text-faint)] hover:bg-white/5 hover:text-[var(--c-text-secondary)]"
+                  >
+                    SQL
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    ))
+  );
+
   return (
     <div className="flex min-h-0 flex-1">
       {/* Schema tree */}
       <div style={{ width: split.value }} className="sidebar-scroll flex shrink-0 flex-col overflow-y-auto border-r border-[var(--c-border)] bg-[var(--c-bg2)] p-2">
-        {pickedDatabase && (
-          <p className="mb-1 truncate px-1.5 text-[10px] text-[var(--c-text-faint)]">Base sélectionnée : <span className="font-mono">{pickedDatabase}</span></p>
-        )}
-        {needsDatabasePick ? (
+        {multiDatabase ? (
           databases === null ? (
             <p className="p-2 text-xs text-[var(--c-text-muted)]">Chargement des bases…</p>
           ) : databases.length === 0 ? (
             <p className="p-2 text-xs text-[var(--c-text-muted)]">Aucune base visible</p>
           ) : (
-            databases.map((db) => (
-              <button
-                key={db}
-                onClick={() => pickDatabase(db)}
-                className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[13px] text-[var(--c-text-secondary)] hover:bg-white/5"
-              >
-                <IconDatabase size={12} className="shrink-0 text-[var(--c-text-faint)]" />
-                <span className="min-w-0 flex-1 truncate">{db}</span>
-              </button>
-            ))
-          )
-        ) : schemas === null ? (
-          <p className="p-2 text-xs text-[var(--c-text-muted)]">Chargement du schéma…</p>
-        ) : schemas.length === 0 ? (
-          <p className="p-2 text-xs text-[var(--c-text-muted)]">Aucune base/schéma visible</p>
-        ) : (
-          schemas.map((schema) => (
-            <div key={schema}>
-              <button
-                onClick={() => toggleSchema(schema)}
-                className={`flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-[13px] text-[var(--c-text-secondary)] hover:bg-white/5 ${
-                  selected?.kind === "schema" && selected.schema === schema ? "bg-white/5" : ""
-                }`}
-              >
-                {expandedSchemas.has(schema) ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
-                <IconDatabase size={12} className="shrink-0 text-[var(--c-text-faint)]" />
-                <span className="min-w-0 flex-1 truncate">{schema}</span>
-              </button>
-              {expandedSchemas.has(schema) && (
-                <div className="ml-4 border-l border-[var(--c-border)] pl-2">
-                  {!tablesBySchema[schema] ? (
-                    <p className="px-1 py-1 text-[11px] text-[var(--c-text-muted)]">…</p>
-                  ) : tablesBySchema[schema].length === 0 ? (
-                    <p className="px-1 py-1 text-[11px] text-[var(--c-text-muted)]">Vide</p>
-                  ) : (
-                    tablesBySchema[schema].map((t) => {
-                      const key = `${schema}.${t.name}`;
-                      return (
-                        <div key={key}>
-                          <div className="flex items-center gap-1">
-                            <button
-                              onClick={() => toggleTable(schema, t.name)}
-                              className={`flex min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 py-1 text-left text-[12px] text-[var(--c-text-secondary)] hover:bg-white/5 ${
-                                selected?.kind === "table" && selected.schema === schema && selected.table === t.name ? "bg-white/5" : ""
-                              }`}
-                            >
-                              {expandedTables.has(key) ? <IconChevronDown size={10} /> : <IconChevronRight size={10} />}
-                              <IconFolder size={11} className="shrink-0 text-[var(--c-text-faint)]" />
-                              <span className="min-w-0 flex-1 truncate">{t.name}</span>
-                              {t.kind === "view" && <span className="shrink-0 text-[9px] text-[var(--c-text-faint)]">vue</span>}
-                            </button>
-                            <button
-                              onClick={() => insertSelect(schema, t.name)}
-                              title="Insérer un SELECT dans l'éditeur"
-                              className="shrink-0 rounded px-1 text-[10px] text-[var(--c-text-faint)] hover:bg-white/5 hover:text-[var(--c-text-secondary)]"
-                            >
-                              SQL
-                            </button>
-                          </div>
-                          {expandedTables.has(key) && (
-                            <div className="ml-4 border-l border-[var(--c-border)] pl-2">
-                              {!columnsByTable[key] ? (
-                                <p className="px-1 py-1 text-[11px] text-[var(--c-text-muted)]">…</p>
-                              ) : (
-                                columnsByTable[key].map((c) => (
-                                  <p key={c.name} className="truncate px-1 py-0.5 text-[11px] text-[var(--c-text-muted)]">
-                                    {c.name} <span className="text-[var(--c-text-faint)]">{c.dataType}{c.nullable ? "" : " · not null"}</span>
-                                  </p>
-                                ))
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
+            databases.map((db) => {
+              const active = db === activeDatabase;
+              return (
+                <div key={db}>
+                  <button
+                    onClick={() => selectDatabase(db)}
+                    className={`flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-[13px] text-[var(--c-text-secondary)] hover:bg-white/5 ${active ? "bg-white/5" : ""}`}
+                  >
+                    {active ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
+                    <IconDatabase size={12} className="shrink-0 text-[var(--c-text-faint)]" />
+                    <span className="min-w-0 flex-1 truncate">{db}</span>
+                  </button>
+                  {active && <div className="ml-4 border-l border-[var(--c-border)] pl-2">{schemaTree}</div>}
                 </div>
-              )}
-            </div>
-          ))
+              );
+            })
+          )
+        ) : (
+          schemaTree
         )}
       </div>
 

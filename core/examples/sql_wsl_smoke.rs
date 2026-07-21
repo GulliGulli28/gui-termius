@@ -73,9 +73,19 @@ async fn run(workspace: &termius_core::model::Workspace, conn: &SqlConnection) -
             println!("==   columns of {schema}.{}: {columns:?}", table.name);
 
             let query = format!("SELECT * FROM {schema}.{} LIMIT 5", table.name);
-            match sql::execute_query(&session.pool, &query).await {
+            match sql::execute_query(&session.pool, None, &query).await {
                 Ok(rows) => println!("==   SELECT * FROM {schema}.{}: {rows:?}", table.name),
                 Err(e) => println!("==   SELECT * FROM {schema}.{} FAILED: {e:#}", table.name),
+            }
+
+            // Same query, unqualified table name, with `schema` given as
+            // context (what the tree's "SQL" shortcut + selection now does)
+            // — exercises `SET search_path` landing on the same connection
+            // the real query runs on.
+            let unqualified = format!("SELECT * FROM {} LIMIT 5", table.name);
+            match sql::execute_query(&session.pool, Some(schema), &unqualified).await {
+                Ok(rows) => println!("==   [context={schema:?}] SELECT * FROM {}: {rows:?}", table.name),
+                Err(e) => println!("==   [context={schema:?}] SELECT * FROM {} FAILED: {e:#}", table.name),
             }
         }
     }

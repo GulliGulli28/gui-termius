@@ -396,10 +396,26 @@ pub struct QueryResult {
 /// there is no "N rows affected" count in `QueryResult` for those: getting
 /// that would need a separate `execute()` call, and calling both would run
 /// a mutating statement twice.
-pub async fn execute_query(pool: &SqlPool, sql: &str) -> anyhow::Result<QueryResult> {
+///
+/// `schema`, when given (the tree's current selection — see
+/// `commands::sql::run_sql_query`), is applied as query *context* so
+/// unqualified table names resolve there (`SELECT * FROM customers` instead
+/// of `SELECT * FROM demo.customers`) — `SET search_path` for PostgreSQL,
+/// `USE` for MySQL. Fully-qualified references in `sql` are unaffected
+/// either way. This explicitly acquires one connection (`pool.acquire()`)
+/// and runs both statements on it, rather than sending them as separate
+/// `fetch(pool)` calls: a `Pool` hands out whichever idle connection is
+/// available per call, so two separate pool-level calls could easily land
+/// on two *different* physical connections — the context-setting statement
+/// would then have no effect on the one that runs the real query.
+pub async fn execute_query(pool: &SqlPool, schema: Option<&str>, sql: &str) -> anyhow::Result<QueryResult> {
     match pool {
         SqlPool::Postgres(pool) => {
-            let mut stream = sqlx::query(sql).fetch(pool);
+            let mut conn = pool.acquire().await?;
+            if let Some(schema) = schema {
+                sqlx::query(&format!("SET search_path TO {}", quote_pg_identifier(schema))).execute(&mut *conn).await?;
+            }
+            let mut stream = sqlx::query(sql).fetch(&mut *conn);
             let mut columns: Vec<String> = Vec::new();
             let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
             let mut truncated = false;
@@ -416,7 +432,11 @@ pub async fn execute_query(pool: &SqlPool, sql: &str) -> anyhow::Result<QueryRes
             Ok(QueryResult { columns, rows, truncated })
         }
         SqlPool::Mysql(pool) => {
-            let mut stream = sqlx::query(sql).fetch(pool);
+            let mut conn = pool.acquire().await?;
+            if let Some(schema) = schema {
+                sqlx::query(&format!("USE {}", quote_mysql_identifier(schema))).execute(&mut *conn).await?;
+            }
+            let mut stream = sqlx::query(sql).fetch(&mut *conn);
             let mut columns: Vec<String> = Vec::new();
             let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
             let mut truncated = false;
@@ -433,6 +453,19 @@ pub async fn execute_query(pool: &SqlPool, sql: &str) -> anyhow::Result<QueryRes
             Ok(QueryResult { columns, rows, truncated })
         }
     }
+}
+
+/// Quotes `name` as a PostgreSQL identifier (double quotes, doubling any
+/// embedded quote) — `schema` always comes from our own `list_schemas`
+/// output, never raw user input, but quoting it properly costs nothing and
+/// avoids ever building a `SET search_path`/`USE` statement by naive string
+/// interpolation.
+fn quote_pg_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn quote_mysql_identifier(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

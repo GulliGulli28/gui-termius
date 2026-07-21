@@ -50,6 +50,8 @@ interface SidebarProps {
   onDeleteKey: (id: KeyId) => void;
   onRenameKey: (id: KeyId, name: string) => void;
   onConnectSql: (conn: SqlConnection) => void;
+  onNewSqlConnection: () => void;
+  onEditSqlConnection: (conn: SqlConnection) => void;
   onWorkspaceUpdate: (ws: Workspace) => void;
   onError: (message: string) => void;
   preferences: AppPreferences;
@@ -162,8 +164,8 @@ export function Sidebar(props: SidebarProps) {
             <SqlConnectionsPanel
               workspace={workspace}
               onConnect={props.onConnectSql}
-              onWorkspaceUpdate={props.onWorkspaceUpdate}
-              onError={props.onError}
+              onNewConnection={props.onNewSqlConnection}
+              onEditConnection={props.onEditSqlConnection}
             />
           )}
           {panel === "keychain" && (
