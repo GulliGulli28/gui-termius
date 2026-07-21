@@ -7,6 +7,11 @@ on:
     branches: ["**"]
   pull_request:
 
+# None of these jobs push commits, comment on PRs, or touch any GitHub API
+# beyond checking out code — default GITHUB_TOKEN scope down to read-only.
+permissions:
+  contents: read
+
 jobs:
   core:
     # termius-core is pure Rust (no Tauri/webkit), so it builds and tests
