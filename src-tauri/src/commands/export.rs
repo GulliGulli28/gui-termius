@@ -48,15 +48,34 @@ pub fn export_workspace(
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
+/// Clears `startup_snippets`/`env_vars` on every host in `hosts` — both run
+/// automatically, with no user interaction, the moment a shell opens on that
+/// host (see `commands::terminal::startup_commands`). A file imported from
+/// an untrusted source could otherwise carry a host that silently executes
+/// arbitrary commands on its very first connection, with nothing ever shown
+/// to the user for review. Called on the *incoming* data only, before it's
+/// merged into the live workspace — hosts already present locally (trusted,
+/// since the user configured them) are never touched by this.
+fn strip_automation(hosts: &mut [termius_core::model::Host]) {
+    for host in hosts {
+        host.startup_snippets.clear();
+        host.env_vars.clear();
+    }
+}
+
 #[tauri::command]
 pub fn import_workspace(
     state: State<'_, AppState>,
     path: String,
     replace: bool,
+    keep_automation: bool,
 ) -> Result<termius_core::model::Workspace, String> {
     let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let file: ex::WorkspaceExport =
+    let mut file: ex::WorkspaceExport =
         serde_json::from_str(&json).map_err(|e| format!("Format invalide : {}", e))?;
+    if !keep_automation {
+        strip_automation(&mut file.workspace.hosts);
+    }
 
     let mut workspace = state.workspace.lock_recover();
     if replace {
@@ -95,10 +114,14 @@ pub fn export_text(path: String, content: String) -> Result<(), String> {
 pub fn import_host_from_file(
     state: State<'_, AppState>,
     path: String,
+    keep_automation: bool,
 ) -> Result<termius_core::model::Workspace, String> {
     let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let file: ex::HostExport =
+    let mut file: ex::HostExport =
         serde_json::from_str(&json).map_err(|e| format!("Format invalide : {}", e))?;
+    if !keep_automation {
+        strip_automation(std::slice::from_mut(&mut file.host));
+    }
 
     let mut workspace = state.workspace.lock_recover();
     ex::import_host(&mut workspace, file);

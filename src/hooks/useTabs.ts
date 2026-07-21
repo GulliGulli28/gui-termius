@@ -27,14 +27,18 @@ export function useTabs({ workspace, preferences, terminalRefs, pushNotification
   const [tabs, setTabs] = useState<TabMeta[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
 
-  const openTab = useCallback((kind: "terminal" | "transfer" | "rdp-view", host: Host, dockerContainerId?: string) => {
+  const openTab = useCallback((kind: "terminal" | "transfer" | "rdp-view", host: Host, dockerContainerId?: string, k8sPodName?: string, k8sContainerName?: string | null) => {
     const id = `tab-${nextTabId++}`;
     const label = kind === "transfer"
       ? `Transfert : ${host.label}`
       : kind === "rdp-view"
         ? `Aperçu : ${host.label}`
-        : (dockerContainerId ? `${host.label} : ${dockerContainerId}` : host.label);
-    setTabs((prev) => [...prev, { id, kind, hostId: host.id, label, dockerContainerId }]);
+        : dockerContainerId
+          ? `${host.label} : ${dockerContainerId}`
+          : k8sPodName
+            ? `${host.label} : ${k8sPodName}`
+            : host.label;
+    setTabs((prev) => [...prev, { id, kind, hostId: host.id, label, dockerContainerId, k8sPodName, k8sContainerName }]);
     setActiveTabId(id);
   }, []);
 
@@ -139,15 +143,17 @@ export function useTabs({ workspace, preferences, terminalRefs, pushNotification
   // snippet, `programText` isn't a runnable command by itself: each target's
   // platform determines what actually gets typed (see `core::adaptive`), so
   // this resolves per target before running the *translated* command.
-  // Three kinds of target are supported, each with its own way of finding
+  // Four kinds of target are supported, each with its own way of finding
   // out "what platform is this": an SSH host's last collected facts
   // (batched through `previewAdaptiveProgram`, collecting first if missing —
-  // same as `FleetTab`'s "Prévisualiser"), a Docker exec container (probed
-  // fresh via `composeAdaptiveForDocker`, one call per target — no facts to
-  // reuse across calls, a `dockerExec` host isn't tied to one container),
-  // or a local terminal's shell (`composeAdaptiveForLocal` — instant for a
-  // native Windows shell, probed locally otherwise). RDP and anything else
-  // is reported and skipped rather than silently typing the raw DSL text.
+  // same as `FleetTab`'s "Prévisualiser"), a Docker exec container or K8s
+  // exec pod/container (probed fresh via `composeAdaptiveForDocker`/
+  // `composeAdaptiveForK8s`, one call per target — no facts to reuse across
+  // calls, neither a `dockerExec` nor a `k8sExec` host is tied to one
+  // container/pod), or a local terminal's shell (`composeAdaptiveForLocal` —
+  // instant for a native Windows shell, probed locally otherwise). RDP and
+  // anything else is reported and skipped rather than silently typing the
+  // raw DSL text.
   const runAdaptiveSnippet = useCallback(async (programText: string, targetTabIds?: string[]) => {
     if (!workspace) return;
     const ids = targetTabIds && targetTabIds.length > 0 ? targetTabIds : activeTabId ? [activeTabId] : [];
@@ -171,7 +177,7 @@ export function useTabs({ workspace, preferences, terminalRefs, pushNotification
         continue;
       }
 
-      const ineligible = () => reportError(`« ${tab.label} » : un snippet adaptatif ne peut s'exécuter que sur un terminal local, un hôte SSH ou Docker exec`);
+      const ineligible = () => reportError(`« ${tab.label} » : un snippet adaptatif ne peut s'exécuter que sur un terminal local, un hôte SSH, Docker exec ou K8s exec`);
       if (tab.kind !== "terminal") { ineligible(); continue; }
       const host = workspace.hosts.find((h) => h.id === tab.hostId);
       if (!host) { ineligible(); continue; }
@@ -179,6 +185,13 @@ export function useTabs({ workspace, preferences, terminalRefs, pushNotification
       if (host.kind === "dockerExec") {
         if (!tab.dockerContainerId) { reportError(`« ${tab.label} » : aucun conteneur associé à cet onglet`); continue; }
         api.composeAdaptiveForDocker(programText, host.id, tab.dockerContainerId)
+          .then((result) => runTranslated(tab.label, handle, result))
+          .catch((e) => reportError(String(e)));
+        continue;
+      }
+      if (host.kind === "k8sExec") {
+        if (!tab.k8sPodName) { reportError(`« ${tab.label} » : aucun pod associé à cet onglet`); continue; }
+        api.composeAdaptiveForK8s(programText, host.id, tab.k8sPodName, tab.k8sContainerName ?? null)
           .then((result) => runTranslated(tab.label, handle, result))
           .catch((e) => reportError(String(e)));
         continue;

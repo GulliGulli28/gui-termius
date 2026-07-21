@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "../lib/api";
-import type { DockerContainer, Group, GroupId, Host, HostId, Workspace } from "../lib/types";
+import type { DockerContainer, Group, GroupId, Host, HostId, K8sPod, Workspace } from "../lib/types";
+import { parsePodPickerId, podPickerId } from "../lib/types";
 import { HostIcon } from "./icons";
 import { hostKindMeta } from "../lib/hostKinds";
 import { ramColor } from "../lib/facts";
@@ -14,19 +15,12 @@ import {
   IconUpload, IconDownload, IconTransfer,
 } from "./ui-icons";
 
-// Example-only pods for the Kubernetes picker — k8sExec has no backend yet,
-// see HostKind's doc comment in lib/types.ts.
-const K8S_MOCK_PODS = [
-  { id: "api-7d9f8b6c-x2kq9", name: "api-7d9f8b6c-x2kq9", meta: "default", up: true },
-  { id: "worker-5c7d8f9b-p4m2n", name: "worker-5c7d8f9b-p4m2n", meta: "default", up: true },
-  { id: "migration-job-8f2a1", name: "migration-job-8f2a1", meta: "batch · Completed", up: false },
-];
-
 interface HostsPanelProps {
   workspace: Workspace;
   activeHostId?: HostId | null;
   onConnect: (host: Host) => void;
   onConnectDocker: (host: Host, containerId: string) => void;
+  onConnectK8s: (host: Host, podName: string, containerName: string | null) => void;
   onConnectRdpView: (host: Host) => void;
   onOpenTransfer: (host: Host) => void;
   onOpenLocalTerminal: (shell?: string) => void;
@@ -103,7 +97,7 @@ function LocalTerminalButton({ onOpen }: { onOpen: (shell?: string) => void }) {
 }
 
 export function HostsPanel({
-  workspace, activeHostId, onConnect, onConnectDocker, onConnectRdpView, onOpenTransfer, onOpenLocalTerminal,
+  workspace, activeHostId, onConnect, onConnectDocker, onConnectK8s, onConnectRdpView, onOpenTransfer, onOpenLocalTerminal,
   onNewHost, onEditHost, onNewGroup, onNewHostInGroup, onNewGroupUnder,
   onEditGroup, onQuickSSH, onWorkspaceUpdate, onError,
 }: HostsPanelProps) {
@@ -113,11 +107,14 @@ export function HostsPanel({
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [hostStatus, setHostStatus] = useState<Record<string, boolean>>({});
   const [containerCounts, setContainerCounts] = useState<Record<string, number | null>>({});
+  const [podCounts, setPodCounts] = useState<Record<string, number | null>>({});
   const [exportPendingHost, setExportPendingHost] = useState<Host | null>(null);
   const [dockerPickerHost, setDockerPickerHost] = useState<Host | null>(null);
   const [dockerContainers, setDockerContainers] = useState<DockerContainer[] | null>(null);
   const [dockerPickerError, setDockerPickerError] = useState<string | null>(null);
   const [k8sPickerHost, setK8sPickerHost] = useState<Host | null>(null);
+  const [k8sPods, setK8sPods] = useState<K8sPod[] | null>(null);
+  const [k8sPickerError, setK8sPickerError] = useState<string | null>(null);
 
   const hostIdsKey = workspace.hosts.map((h) => h.id).join(",");
   useEffect(() => {
@@ -158,6 +155,30 @@ export function HostsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostIdsKey]);
 
+  // Live "N prêts" count for K8s hosts, same spirit as the Docker container
+  // count above — visible before ever opening the pod picker. Best-effort:
+  // an unreachable/misconfigured context simply contributes no count rather
+  // than blocking the rest of the panel.
+  useEffect(() => {
+    let cancelled = false;
+    const k8sHosts = workspace.hosts.filter((h) => h.kind === "k8sExec");
+    const poll = () => {
+      for (const host of k8sHosts) {
+        api.listK8sPods(host.id)
+          .then((pods) => {
+            if (cancelled) return;
+            const ready = pods.filter((p) => p.ready).length;
+            setPodCounts((prev) => ({ ...prev, [host.id]: ready }));
+          })
+          .catch(() => { if (!cancelled) setPodCounts((prev) => ({ ...prev, [host.id]: null })); });
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 30000);
+    return () => { cancelled = true; clearInterval(interval); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostIdsKey]);
+
   const openDockerPicker = (host: Host) => {
     setDockerPickerHost(host);
     setDockerContainers(null);
@@ -167,11 +188,20 @@ export function HostsPanel({
       .catch((e) => setDockerPickerError(String(e)));
   };
 
+  const openK8sPicker = (host: Host) => {
+    setK8sPickerHost(host);
+    setK8sPods(null);
+    setK8sPickerError(null);
+    api.listK8sPods(host.id)
+      .then(setK8sPods)
+      .catch((e) => setK8sPickerError(String(e)));
+  };
+
   const handleConnect = (host: Host) => {
     const kind = host.kind ?? "ssh";
     if (kind === "ssh") { onConnect(host); return; }
     if (kind === "dockerExec") { openDockerPicker(host); return; }
-    if (kind === "k8sExec") { setK8sPickerHost(host); return; }
+    if (kind === "k8sExec") { openK8sPicker(host); return; }
     // rdp: the embedded preview is the default click, same as any other
     // host kind — the system client launcher (mstsc.exe/xfreerdp, fully
     // interactive but not view-only) moved to the "…" menu, see below.
@@ -239,7 +269,11 @@ export function HostsPanel({
     try {
       const path = await open({ title: "Importer un hôte", multiple: false, filters: fileFilters });
       if (path && typeof path === "string") {
-        const ws = await api.importHostFromFile(path);
+        // Quick single-host import has no confirmation step to attach a
+        // toggle to (unlike SettingsPanel's full import flow) — always
+        // strip startup automation from the untrusted file, the safe
+        // default. See api.importHostFromFile's doc comment.
+        const ws = await api.importHostFromFile(path, false);
         onWorkspaceUpdate?.(ws);
       }
     } catch (e) { onError?.(String(e)); }
@@ -256,7 +290,7 @@ export function HostsPanel({
       kind === "k8sExec" ? `Contexte : ${host.address}` :
       kind === "rdp" ? `${host.username}@${host.address}${host.port !== 3389 ? `:${host.port}` : ""}` :
       `${host.username}@${host.address}${host.port !== 22 ? `:${host.port}` : ""}`;
-    const runningCount = kind === "dockerExec" ? containerCounts[host.id] : undefined;
+    const runningCount = kind === "dockerExec" ? containerCounts[host.id] : kind === "k8sExec" ? podCounts[host.id] : undefined;
     return (
       <div
         key={host.id}
@@ -568,10 +602,23 @@ export function HostsPanel({
       {k8sPickerHost && (
         <ConnectionPickerModal
           title={`Pods Kubernetes — ${k8sPickerHost.label}`}
-          warning="Aperçu avec des données d'exemple — le backend Kubernetes n'est pas encore implémenté."
-          loading={false}
-          items={K8S_MOCK_PODS}
-          onPick={() => { setK8sPickerHost(null); onError?.("Aperçu uniquement — l'exécution Kubernetes n'est pas encore implémentée."); }}
+          loading={k8sPods === null && !k8sPickerError}
+          error={k8sPickerError}
+          items={(k8sPods ?? []).flatMap((pod) =>
+            pod.containers.length > 1
+              ? pod.containers.map((c) => ({
+                  id: podPickerId(pod.name, c),
+                  name: `${pod.name} › ${c}`,
+                  meta: `${pod.namespace} · ${pod.phase}`,
+                  up: pod.ready,
+                }))
+              : [{ id: podPickerId(pod.name), name: pod.name, meta: `${pod.namespace} · ${pod.phase}`, up: pod.ready }],
+          )}
+          onPick={(id) => {
+            const { podName, containerName } = parsePodPickerId(id);
+            onConnectK8s(k8sPickerHost, podName, containerName);
+            setK8sPickerHost(null);
+          }}
           onClose={() => setK8sPickerHost(null)}
         />
       )}

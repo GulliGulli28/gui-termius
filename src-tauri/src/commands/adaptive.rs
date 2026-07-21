@@ -16,7 +16,7 @@ use termius_core::fleet::FleetTarget;
 use termius_core::model::{HostFacts, HostId, Snippet, SnippetId, Workspace};
 use termius_core::store;
 use termius_core::sync_ext::MutexExt;
-use termius_core::{docker, facts, local_shell};
+use termius_core::{docker, facts, k8s, local_shell};
 use termius_core::vault;
 
 /// Asks the AI to write (`existing_text` empty) or extend it with `intent`.
@@ -90,6 +90,30 @@ pub async fn compose_adaptive_for_docker(
     // see `App.tsx`'s `openTab`) so `target name` reads the same way a user
     // already sees the target named elsewhere in the UI.
     let name = format!("{} : {container_id}", host.label);
+    let ctx = adaptive::HostContext { facts: host_facts.as_ref(), name: &name, tags: &host.tags };
+    Ok(adaptive::compose_for_host(&program, &platform_key, ctx))
+}
+
+/// Translates `program_text` for a **K8s exec** terminal's pod — same
+/// "probed fresh, never cached" reasoning as [`compose_adaptive_for_docker`]:
+/// a `k8sExec` `Host` isn't tied to one pod either.
+#[tauri::command]
+pub async fn compose_adaptive_for_k8s(
+    state: State<'_, AppState>,
+    program_text: String,
+    host_id: HostId,
+    pod_name: String,
+    container_name: Option<String>,
+) -> Result<ComposeResult, String> {
+    let workspace = state.workspace.lock_recover().clone();
+    let host = workspace.host(host_id).ok_or_else(|| "hôte inconnu".to_string())?;
+    let client = k8s::connect(&host.address).await.map_err(|e| e.to_string())?;
+    let host_facts = k8s::probe_pod_facts(&client, &host.username, &pod_name, container_name.as_deref()).await;
+    let program = adaptive::parse_program(&program_text)?;
+    let platform_key = host_facts.as_ref().and_then(|f| f.os_id.clone()).unwrap_or_else(|| "unknown".to_string());
+    // `name` mirrors the tab label convention (`${host.label} : ${podName}`,
+    // see `App.tsx`'s `openTab`), same spirit as the Docker arm above.
+    let name = format!("{} : {pod_name}", host.label);
     let ctx = adaptive::HostContext { facts: host_facts.as_ref(), name: &name, tags: &host.tags };
     Ok(adaptive::compose_for_host(&program, &platform_key, ctx))
 }

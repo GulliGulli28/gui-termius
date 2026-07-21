@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import type { DockerContainer, Group, GroupId, Host, Workspace } from "../lib/types";
+import type { DockerContainer, Group, GroupId, Host, K8sPod, Workspace } from "../lib/types";
+import { parsePodPickerId, podPickerId } from "../lib/types";
 import { HostIcon } from "./icons";
 import { hostKindMeta } from "../lib/hostKinds";
 import { ConnectionPickerModal } from "./ConnectionPickerModal";
@@ -8,7 +9,7 @@ import { IconSearch, IconHosts, IconFolder, IconTransfer, IconChevronDown, IconC
 
 interface SftpPanelProps {
   workspace: Workspace;
-  onOpenTransfer: (host: Host, containerId?: string) => void;
+  onOpenTransfer: (host: Host, dockerContainerId?: string, k8sPodName?: string, k8sContainerName?: string | null) => void;
 }
 
 export function SftpPanel({ workspace, onOpenTransfer }: SftpPanelProps) {
@@ -28,6 +29,17 @@ export function SftpPanel({ workspace, onOpenTransfer }: SftpPanelProps) {
     api.listDockerContainers(host.id).then(setDockerContainers).catch((e) => setDockerPickerError(String(e)));
   };
 
+  // Same idea for K8s exec — a pod/container has to be picked first.
+  const [k8sPickerHost, setK8sPickerHost] = useState<Host | null>(null);
+  const [k8sPods, setK8sPods] = useState<K8sPod[] | null>(null);
+  const [k8sPickerError, setK8sPickerError] = useState<string | null>(null);
+  const openK8sPicker = (host: Host) => {
+    setK8sPickerHost(host);
+    setK8sPods(null);
+    setK8sPickerError(null);
+    api.listK8sPods(host.id).then(setK8sPods).catch((e) => setK8sPickerError(String(e)));
+  };
+
   const hostIdsKey = workspace.hosts.map((h) => h.id).join(",");
   useEffect(() => {
     let cancelled = false;
@@ -45,10 +57,13 @@ export function SftpPanel({ workspace, onOpenTransfer }: SftpPanelProps) {
   }, [hostIdsKey]);
 
   const query = search.trim().toLowerCase();
-  // rdp/k8sExec hosts have no file-listing backend — SFTP-shaped browsing
-  // only applies to ssh/dockerExec (see `TransferTab.tsx`'s source picker,
-  // filtered the same way).
-  const supportsTransfer = (host: Host) => (host.kind ?? "ssh") === "ssh" || (host.kind ?? "ssh") === "dockerExec";
+  // rdp hosts have no file-listing backend — SFTP-shaped browsing only
+  // applies to ssh/dockerExec/k8sExec (see `TransferTab.tsx`'s source
+  // picker, filtered the same way).
+  const supportsTransfer = (host: Host) => {
+    const kind = host.kind ?? "ssh";
+    return kind === "ssh" || kind === "dockerExec" || kind === "k8sExec";
+  };
   const matches = (host: Host) =>
     supportsTransfer(host) &&
     (!query || host.label.toLowerCase().includes(query) || host.address.toLowerCase().includes(query) ||
@@ -76,7 +91,8 @@ export function SftpPanel({ workspace, onOpenTransfer }: SftpPanelProps) {
   const renderHost = (host: Host, depth: number) => {
     const kind = host.kind ?? "ssh";
     const isDocker = kind === "dockerExec";
-    const subtitle = isDocker ? host.address : `${host.username}@${host.address}${host.port !== 22 ? `:${host.port}` : ""}`;
+    const isK8s = kind === "k8sExec";
+    const subtitle = isDocker || isK8s ? host.address : `${host.username}@${host.address}${host.port !== 22 ? `:${host.port}` : ""}`;
     return (
     <div
       key={host.id}
@@ -85,16 +101,16 @@ export function SftpPanel({ workspace, onOpenTransfer }: SftpPanelProps) {
     >
       <div className="flex items-stretch">
         <button
-          onClick={() => (isDocker ? openDockerPicker(host) : onOpenTransfer(host))}
+          onClick={() => (isDocker ? openDockerPicker(host) : isK8s ? openK8sPicker(host) : onOpenTransfer(host))}
           className="flex min-w-0 flex-1 items-center gap-2.5 p-3 text-left"
-          title={isDocker ? hostKindMeta(kind).label : `Transférer — ${subtitle}`}
+          title={isDocker || isK8s ? hostKindMeta(kind).label : `Transférer — ${subtitle}`}
         >
           <div className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[var(--c-accent-dim)]">
             {host.icon
               ? <HostIcon iconId={host.icon} customIcons={workspace.customIcons} size={24} />
               : <IconHosts size={18} className="text-[var(--c-accent-text)]" />
             }
-            {isDocker && (
+            {(isDocker || isK8s) && (
               <span
                 title={hostKindMeta(kind).label}
                 className="absolute -left-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border-2 border-[var(--c-bg3)] bg-[var(--c-bg2)] text-[var(--c-text-secondary)]"
@@ -194,6 +210,30 @@ export function SftpPanel({ workspace, onOpenTransfer }: SftpPanelProps) {
           items={(dockerContainers ?? []).map((c) => ({ id: c.id, name: c.name || c.id.slice(0, 12), meta: `${c.image} · ${c.status}`, up: c.state === "running" }))}
           onPick={(containerId) => { onOpenTransfer(dockerPickerHost, containerId); setDockerPickerHost(null); }}
           onClose={() => setDockerPickerHost(null)}
+        />
+      )}
+
+      {k8sPickerHost && (
+        <ConnectionPickerModal
+          title={`Pods Kubernetes — ${k8sPickerHost.label}`}
+          loading={k8sPods === null && !k8sPickerError}
+          error={k8sPickerError}
+          items={(k8sPods ?? []).flatMap((pod) =>
+            pod.containers.length > 1
+              ? pod.containers.map((c) => ({
+                  id: podPickerId(pod.name, c),
+                  name: `${pod.name} › ${c}`,
+                  meta: `${pod.namespace} · ${pod.phase}`,
+                  up: pod.ready,
+                }))
+              : [{ id: podPickerId(pod.name), name: pod.name, meta: `${pod.namespace} · ${pod.phase}`, up: pod.ready }],
+          )}
+          onPick={(id) => {
+            const { podName, containerName } = parsePodPickerId(id);
+            onOpenTransfer(k8sPickerHost, undefined, podName, containerName);
+            setK8sPickerHost(null);
+          }}
+          onClose={() => setK8sPickerHost(null)}
         />
       )}
     </div>

@@ -370,8 +370,9 @@ export default function App() {
             activeHostId={activeHostId}
             onConnect={(host) => openTab("terminal", host)}
             onConnectDocker={(host, containerId) => openTab("terminal", host, containerId)}
+            onConnectK8s={(host, podName, containerName) => openTab("terminal", host, undefined, podName, containerName)}
             onConnectRdpView={(host) => openTab("rdp-view", host)}
-            onOpenTransfer={(host, containerId) => openTab("transfer", host, containerId)}
+            onOpenTransfer={(host, dockerContainerId, k8sPodName, k8sContainerName) => openTab("transfer", host, dockerContainerId, k8sPodName, k8sContainerName)}
             onOpenLocalTerminal={(shell) => openLocalTerminal(undefined, shell)}
             onQuickSSH={(cmd) => openLocalTerminal(cmd)}
             onNewHost={() => { setEditingHost("new"); setNewHostDefaultGroupId(null); setEditingGroup(null); }}
@@ -489,6 +490,8 @@ export default function App() {
                           onDisconnect={() => closeTab(tab.id, "disconnected")}
                           onInputData={(data) => mirrorInput(tab.id, data)}
                           dockerContainerId={tab.kind === "terminal" ? tab.dockerContainerId : undefined}
+                          k8sPodName={tab.kind === "terminal" ? tab.k8sPodName : undefined}
+                          k8sContainerName={tab.kind === "terminal" ? tab.k8sContainerName : undefined}
                           ref={(handle) => {
                             if (handle) terminalRefs.current.set(tab.id, handle);
                             else terminalRefs.current.delete(tab.id);
@@ -513,6 +516,8 @@ export default function App() {
                           onError={reportError}
                           onPushed={(message) => pushNotification("success", message)}
                           dockerContainerId={tab.kind === "transfer" ? tab.dockerContainerId : undefined}
+                          k8sPodName={tab.kind === "transfer" ? tab.k8sPodName : undefined}
+                          k8sContainerName={tab.kind === "transfer" ? tab.k8sContainerName : undefined}
                         />
                       )}
                     </div>

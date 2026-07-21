@@ -94,6 +94,7 @@ function ToggleRow({ label, checked, onChange }: { label: string; checked: boole
 export function SettingsPanel({ workspace, onWorkspaceUpdate, onError, preferences, onPreferencesChange, vaultStatus, onVaultStatusChange }: SettingsPanelProps) {
   const [category, setCategory] = useState<SettingsCategory>("apparence");
   const [importPending, setImportPending] = useState<ImportPending | null>(null);
+  const [importKeepAutomation, setImportKeepAutomation] = useState(false);
   const [done, setDone] = useState<string | null>(null);
   const [includeKeyMaterial, setIncludeKeyMaterial] = useState(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -160,14 +161,14 @@ export function SettingsPanel({ workspace, onWorkspaceUpdate, onError, preferenc
   const handleImportWorkspaceFile = async () => {
     try {
       const path = await open({ title: "Importer une configuration", multiple: false, filters: fileFilters });
-      if (path && typeof path === "string") setImportPending({ path });
+      if (path && typeof path === "string") { setImportPending({ path }); setImportKeepAutomation(false); }
     } catch (e) { onError(String(e)); }
   };
 
   const confirmImport = async (replace: boolean) => {
     if (!importPending) return;
     try {
-      const ws = await api.importWorkspace(importPending.path, replace);
+      const ws = await api.importWorkspace(importPending.path, replace, importKeepAutomation);
       onWorkspaceUpdate(ws);
       flash(replace ? "Configuration remplacée ✓" : "Configuration fusionnée ✓");
     } catch (e) { onError(String(e)); }
@@ -616,6 +617,19 @@ export function SettingsPanel({ workspace, onWorkspaceUpdate, onError, preferenc
                 ) : (
                   <div className="space-y-1.5">
                     <p className="text-[13px] text-sky-400">Choisissez le mode d'import :</p>
+                    <label className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[12px] text-amber-200">
+                      <input
+                        type="checkbox"
+                        checked={importKeepAutomation}
+                        onChange={(e) => setImportKeepAutomation(e.target.checked)}
+                        className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--c-accent)]"
+                      />
+                      <span>
+                        Conserver les snippets/variables de démarrage automatiques du fichier — sinon ils sont
+                        retirés par défaut (un hôte importé peut sinon exécuter des commandes automatiquement
+                        dès la première connexion, sans validation).
+                      </span>
+                    </label>
                     <div className="flex flex-wrap gap-1.5">
                       <button
                         onClick={() => confirmImport(false)}

@@ -4,13 +4,13 @@
 //! "control plane" primitive the terminal path deliberately lacks — and the
 //! foundation the facts-collection and declarative-intent layers build on.
 //!
-//! A target is an SSH host, a specific Docker exec container, or the local
-//! machine ([`FleetTarget`]) — RDP has no shell and K8s exec has no backend
-//! yet, so those aren't representable here at all; the UI simply never
-//! offers them.
+//! A target is an SSH host, a specific Docker exec container, a specific
+//! K8s exec pod/container, or the local machine ([`FleetTarget`]) — RDP has
+//! no shell, so it isn't representable here at all; the UI simply never
+//! offers it.
 
 use crate::model::{HostId, HostKind, Workspace};
-use crate::{docker, local_shell, ssh};
+use crate::{docker, k8s, local_shell, ssh};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,6 +43,14 @@ pub enum FleetTarget {
     /// `HostKind::DockerExec`'s doc comment) — the caller supplies it fresh
     /// each time (a live container list, in the UI's case).
     Docker { host_id: HostId, container_id: String },
+    /// A specific pod (and, if the pod has more than one, container) of a
+    /// `k8sExec` host — `host_id` identifies the kubeconfig context
+    /// (`k8s::connect`) and default namespace (`Host::username`, per
+    /// `HostKind::K8sExec`'s doc comment); `pod_name`/`container_name` the
+    /// live pod to run in, supplied fresh each time (a live pod list, in the
+    /// UI's case) — same reasoning as `Docker`'s `container_id`, a
+    /// `k8sExec` host isn't tied to one pod either.
+    K8s { host_id: HostId, pod_name: String, container_name: Option<String> },
     /// The machine Guiterm itself runs on — no host lookup, no connection.
     Local,
 }
@@ -165,6 +173,21 @@ async fn execute(
             .await?;
             Ok(ssh::CommandOutput { exit_code, stdout, stderr })
         }
+        FleetTarget::K8s { host_id, pod_name, container_name } => {
+            let host = workspace
+                .host(*host_id)
+                .ok_or_else(|| anyhow::anyhow!("hôte Kubernetes inconnu"))?;
+            let client = k8s::connect(&host.address).await?;
+            let (exit_code, stdout, stderr) = k8s::exec_with_exit_code(
+                &client,
+                &host.username,
+                pod_name,
+                container_name.as_deref(),
+                vec!["sh".to_string(), "-c".to_string(), command.to_string()],
+            )
+            .await?;
+            Ok(ssh::CommandOutput { exit_code, stdout, stderr })
+        }
         FleetTarget::Local => {
             let shell = local_shell::default_local_shell();
             let script = command.to_string();
@@ -208,6 +231,12 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(docker, FleetTarget::Docker { .. }));
+
+        let k8s: FleetTarget = serde_json::from_str(
+            r#"{"kind":"k8s","hostId":"11111111-1111-1111-1111-111111111111","podName":"api-7d9f8b6c-x2kq9","containerName":"api"}"#,
+        )
+        .unwrap();
+        assert!(matches!(k8s, FleetTarget::K8s { .. }));
     }
 
     #[test]
@@ -221,5 +250,17 @@ mod tests {
         assert!(json.contains("\"containerId\""), "expected containerId in {json}");
         assert!(!json.contains("host_id"), "must not contain snake_case host_id in {json}");
         assert!(!json.contains("container_id"), "must not contain snake_case container_id in {json}");
+
+        let k8s = FleetTarget::K8s {
+            host_id: uuid::Uuid::nil(),
+            pod_name: "api-7d9f8b6c-x2kq9".to_string(),
+            container_name: Some("api".to_string()),
+        };
+        let json = serde_json::to_string(&k8s).unwrap();
+        assert!(json.contains("\"hostId\""), "expected hostId in {json}");
+        assert!(json.contains("\"podName\""), "expected podName in {json}");
+        assert!(json.contains("\"containerName\""), "expected containerName in {json}");
+        assert!(!json.contains("pod_name"), "must not contain snake_case pod_name in {json}");
+        assert!(!json.contains("container_name"), "must not contain snake_case container_name in {json}");
     }
 }

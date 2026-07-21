@@ -35,9 +35,9 @@ export interface EnvVar {
  *   `dockerViaHostId` is set, in which case `address` is ignored and the
  *   daemon is reached by tunnelling through that other (SSH) host instead.
  * - `k8sExec`: `address` is a kubeconfig context, `username` is the default
- *   namespace. UI-only for now — no backend yet.
+ *   namespace pods are listed/exec'd in — see `core::k8s`.
  * - `rdp`: `address`/`port`/`username` keep their literal meaning; `auth` is
- *   restricted to `password` in the UI. UI-only for now — no backend yet. */
+ *   restricted to `password` in the UI. */
 export type HostKind = "ssh" | "dockerExec" | "k8sExec" | "rdp";
 
 export interface Host {
@@ -72,6 +72,31 @@ export interface DockerContainer {
   image: string;
   state: string;
   status: string;
+}
+
+/** One pod in a K8s exec host's default namespace. Mirrors
+ * `termius_core::k8s::PodSummary`. `containers`: every container name in
+ * the pod's spec — more than one means a picker needs to ask which one to
+ * exec into (the API defaults to "the only container" otherwise). */
+export interface K8sPod {
+  name: string;
+  namespace: string;
+  containers: string[];
+  phase: string;
+  ready: boolean;
+}
+
+/** A pod name never contains `/` (DNS-1123 label), so `podName/containerName`
+ * safely round-trips through `ConnectionPickerModal`'s flat `id` list —
+ * used only when a pod has more than one container. Shared by every K8s pod
+ * picker (`HostsPanel.tsx`, `SplitPane.tsx`, `TransferTab.tsx`). */
+export function podPickerId(podName: string, containerName?: string): string {
+  return containerName ? `${podName}/${containerName}` : podName;
+}
+
+export function parsePodPickerId(id: string): { podName: string; containerName: string | null } {
+  const slash = id.indexOf("/");
+  return slash === -1 ? { podName: id, containerName: null } : { podName: id.slice(0, slash), containerName: id.slice(slash + 1) };
 }
 
 /** Mirrors `rdp_ipc::ClientMessage` — mouse/keyboard forwarded to an
@@ -205,7 +230,13 @@ export type PaneSource =
    * endpoints for read/write/upload/download) instead of a real SFTP
    * session. `containerId` picked the same way `connectDockerExec` picks
    * one — see `TransferTab.tsx`'s Docker container picker. */
-  | { kind: "docker"; hostId: HostId; containerId: string };
+  | { kind: "docker"; hostId: HostId; containerId: string }
+  /** A K8s exec host's pod filesystem — same idea as `docker` above, but
+   * driven by `core::k8s_pane::K8sPaneClient` (shell-based listing/mkdir/
+   * rename/remove/chmod, `tar`-over-`exec` for read/write/upload/download —
+   * Kubernetes has no container-archive endpoint equivalent). `podName`/
+   * `containerName` picked the same way `connectK8sExec` picks them. */
+  | { kind: "k8s"; hostId: HostId; podName: string; containerName: string | null };
 
 export interface PaneOpened {
   paneId: string;
@@ -228,17 +259,27 @@ export interface PaneState {
 }
 
 export type TabMeta =
-  | { id: string; kind: "terminal" | "transfer" | "rdp-view"; hostId: HostId; label: string; status?: "connected" | "placeholder"; dockerContainerId?: string }
+  | {
+      id: string;
+      kind: "terminal" | "transfer" | "rdp-view";
+      hostId: HostId;
+      label: string;
+      status?: "connected" | "placeholder";
+      dockerContainerId?: string;
+      k8sPodName?: string;
+      k8sContainerName?: string | null;
+    }
   | { id: string; kind: "local-terminal"; label: string; initialCommand?: string; shell?: string | null; status?: "connected" | "placeholder" }
   | { id: string; kind: "fleet"; label: string; status?: "connected" | "placeholder" };
 
 /** A single fleet run target — an SSH host, a specific Docker exec
- * container, or the local machine. Mirrors `termius_core::fleet::FleetTarget`.
- * RDP/K8s exec aren't representable here — the UI never offers them as
- * fleet targets. */
+ * container, a specific K8s exec pod/container, or the local machine.
+ * Mirrors `termius_core::fleet::FleetTarget`. RDP isn't representable here
+ * (no shell) — the UI never offers it as a fleet target. */
 export type FleetTarget =
   | { kind: "ssh"; hostId: HostId }
   | { kind: "docker"; hostId: HostId; containerId: string }
+  | { kind: "k8s"; hostId: HostId; podName: string; containerName: string | null }
   | { kind: "local" };
 
 /** Stable string key for a `FleetTarget`, used as the React selection/results
@@ -249,6 +290,8 @@ export function fleetTargetKey(t: FleetTarget): string {
       return `ssh:${t.hostId}`;
     case "docker":
       return `docker:${t.hostId}:${t.containerId}`;
+    case "k8s":
+      return `k8s:${t.hostId}:${t.podName}:${t.containerName ?? ""}`;
     case "local":
       return "local";
   }
@@ -326,9 +369,10 @@ export interface ExecutionGroup {
 }
 
 /** A single target's translated command — see `core::adaptive::ComposeResult`.
- * Used for a local terminal or Docker exec target (`composeAdaptiveForLocal`/
- * `composeAdaptiveForDocker`), which never need `ExecutionGroup`'s per-host
- * grouping since there's only ever one target. */
+ * Used for a local terminal, Docker exec, or K8s exec target
+ * (`composeAdaptiveForLocal`/`composeAdaptiveForDocker`/`composeAdaptiveForK8s`),
+ * which never need `ExecutionGroup`'s per-host grouping since there's only
+ * ever one target. */
 export interface ComposeResult {
   command: string | null;
   note: string | null;

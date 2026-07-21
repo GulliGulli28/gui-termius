@@ -3,7 +3,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, onTransferDone, onTransferError, onTransferProgress } from "../lib/api";
 import type { AppPreferences } from "../lib/preferences";
-import type { DockerContainer, Entry, Host, PaneListed, PaneOpened, PaneSource, PaneState, Workspace } from "../lib/types";
+import type { DockerContainer, Entry, Host, K8sPod, PaneListed, PaneOpened, PaneSource, PaneState, Workspace } from "../lib/types";
+import { parsePodPickerId, podPickerId } from "../lib/types";
 import { IconFolder, IconEdit, IconTrash, IconShield, IconClose } from "./ui-icons";
 import { QuickEditModal } from "./QuickEditModal";
 import { ConnectionPickerModal } from "./ConnectionPickerModal";
@@ -115,9 +116,14 @@ interface TransferTabProps {
   /** Set when opened on a Docker exec host (a container already picked —
    * see `SftpPanel.tsx`'s `openDockerPicker`) rather than an SSH one. */
   dockerContainerId?: string;
+  /** Set when opened on a K8s exec host (a pod/container already picked —
+   * see `SftpPanel.tsx`'s `openK8sPicker`) rather than an SSH one. Mutually
+   * exclusive with `dockerContainerId`. */
+  k8sPodName?: string;
+  k8sContainerName?: string | null;
 }
 
-export function TransferTab({ host, workspace, preferences, onError, onPushed, dockerContainerId }: TransferTabProps) {
+export function TransferTab({ host, workspace, preferences, onError, onPushed, dockerContainerId, k8sPodName, k8sContainerName }: TransferTabProps) {
   // RDP hosts have no file-listing backend at all — the right panel is the
   // live embedded view itself (`RdpTab`) instead of a browsable pane, and
   // dropping entries from the left panel onto it pushes them onto the
@@ -136,7 +142,9 @@ export function TransferTab({ host, workspace, preferences, onError, onPushed, d
 
   const initialRightSource: PaneSource = dockerContainerId
     ? { kind: "docker", hostId: host.id, containerId: dockerContainerId }
-    : { kind: "remote", hostId: host.id };
+    : k8sPodName
+      ? { kind: "k8s", hostId: host.id, podName: k8sPodName, containerName: k8sContainerName ?? null }
+      : { kind: "remote", hostId: host.id };
 
   const [state, dispatch] = useReducer(reducer, undefined, (): PanesState => ({
     left: { source: { kind: "local" }, status: "connecting", paneId: null, cwd: "", entries: [] },
@@ -549,6 +557,18 @@ function PaneView({ side, pane, workspace, fontSize, onNavigate, onSourceChange,
     api.listDockerContainers(host.id).then(setDockerContainers).catch((e) => setDockerPickerError(String(e)));
   };
 
+  // Same idea for K8s exec — a pod (and, if it has more than one container,
+  // which container) has to be picked before a pane can open.
+  const [k8sPickerHost, setK8sPickerHost] = useState<Host | null>(null);
+  const [k8sPods, setK8sPods] = useState<K8sPod[] | null>(null);
+  const [k8sPickerError, setK8sPickerError] = useState<string | null>(null);
+  const openK8sPicker = (host: Host) => {
+    setK8sPickerHost(host);
+    setK8sPods(null);
+    setK8sPickerError(null);
+    api.listK8sPods(host.id).then(setK8sPods).catch((e) => setK8sPickerError(String(e)));
+  };
+
   const handleSort = (key: SortKey) => {
     if (key === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     else { setSortKey(key); setSortDir("asc"); }
@@ -562,7 +582,7 @@ function PaneView({ side, pane, workspace, fontSize, onNavigate, onSourceChange,
   // the host the user just picked (not the still-unchanged `pane.source`)
   // — otherwise it would visibly snap back to the old selection until a
   // container is actually chosen (`onSourceChange` hasn't fired yet).
-  const sourceValue = dockerPickerHost ? dockerPickerHost.id : pane.source.kind === "local" ? "local" : pane.source.hostId;
+  const sourceValue = dockerPickerHost ? dockerPickerHost.id : k8sPickerHost ? k8sPickerHost.id : pane.source.kind === "local" ? "local" : pane.source.hostId;
 
   const toggleSelect = (name: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -621,17 +641,21 @@ function PaneView({ side, pane, workspace, fontSize, onNavigate, onSourceChange,
             if (v === "local") { onSourceChange(side, { kind: "local" }); return; }
             const host = workspace.hosts.find((h) => h.id === v);
             if (host && (host.kind ?? "ssh") === "dockerExec") { openDockerPicker(host); return; }
+            if (host && (host.kind ?? "ssh") === "k8sExec") { openK8sPicker(host); return; }
             onSourceChange(side, { kind: "remote", hostId: v });
           }}
           className="rounded-md bg-[var(--c-bg3)] px-2 py-1 text-sm text-[var(--c-text)] focus:outline-none focus:ring-1 focus:ring-[var(--c-accent-hover)]"
         >
           <option value="local">Local</option>
-          {/* rdp/k8sExec hosts have no file-listing backend — SFTP-shaped
-              browsing only applies to ssh/dockerExec. */}
+          {/* rdp hosts have no file-listing backend — SFTP-shaped browsing
+              only applies to ssh/dockerExec/k8sExec. */}
           {workspace.hosts
-            .filter((h) => (h.kind ?? "ssh") === "ssh" || (h.kind ?? "ssh") === "dockerExec")
+            .filter((h) => (h.kind ?? "ssh") === "ssh" || (h.kind ?? "ssh") === "dockerExec" || (h.kind ?? "ssh") === "k8sExec")
             .map((h) => (
-              <option key={h.id} value={h.id}>{h.label}{(h.kind ?? "ssh") === "dockerExec" ? " (Docker exec)" : ""}</option>
+              <option key={h.id} value={h.id}>
+                {h.label}
+                {(h.kind ?? "ssh") === "dockerExec" ? " (Docker exec)" : (h.kind ?? "ssh") === "k8sExec" ? " (K8s exec)" : ""}
+              </option>
             ))}
         </select>
         {pane.status === "connecting" && <span className="text-xs text-[var(--c-text-muted)]">connexion…</span>}
@@ -645,6 +669,30 @@ function PaneView({ side, pane, workspace, fontSize, onNavigate, onSourceChange,
           items={(dockerContainers ?? []).map((c) => ({ id: c.id, name: c.name || c.id.slice(0, 12), meta: `${c.image} · ${c.status}`, up: c.state === "running" }))}
           onPick={(containerId) => { onSourceChange(side, { kind: "docker", hostId: dockerPickerHost.id, containerId }); setDockerPickerHost(null); }}
           onClose={() => setDockerPickerHost(null)}
+        />
+      )}
+
+      {k8sPickerHost && (
+        <ConnectionPickerModal
+          title={`Pods Kubernetes — ${k8sPickerHost.label}`}
+          loading={k8sPods === null && !k8sPickerError}
+          error={k8sPickerError}
+          items={(k8sPods ?? []).flatMap((pod) =>
+            pod.containers.length > 1
+              ? pod.containers.map((c) => ({
+                  id: podPickerId(pod.name, c),
+                  name: `${pod.name} › ${c}`,
+                  meta: `${pod.namespace} · ${pod.phase}`,
+                  up: pod.ready,
+                }))
+              : [{ id: podPickerId(pod.name), name: pod.name, meta: `${pod.namespace} · ${pod.phase}`, up: pod.ready }],
+          )}
+          onPick={(id) => {
+            const { podName, containerName } = parsePodPickerId(id);
+            onSourceChange(side, { kind: "k8s", hostId: k8sPickerHost.id, podName, containerName });
+            setK8sPickerHost(null);
+          }}
+          onClose={() => setK8sPickerHost(null)}
         />
       )}
 

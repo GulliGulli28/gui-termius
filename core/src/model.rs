@@ -78,7 +78,7 @@ where
 ///   entirely and the daemon is reached by tunnelling through that other
 ///   (SSH) host instead (see `Host::docker_via_host_id`).
 /// - `K8sExec`: `address` is a kubeconfig context name, `username` is the
-///   default namespace. UI-only for now — no backend yet.
+///   default namespace pods are listed/exec'd in — see `crate::k8s`.
 /// - `Rdp`: `address`/`port`/`username` keep their literal meaning; `auth`
 ///   is restricted to `Password` in the UI. UI-only for now — no backend yet.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

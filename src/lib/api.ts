@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AuthMethod, CollectFactsResult, ComposeResult, DockerContainer, EnvVar, Entry, ExecutionGroup, FleetOutcome, FleetRun, FleetTarget, GroupId, HostId, HostKind, ImportSelection, KeyAlgorithm, KeyId, KnownHostEntry, PaneListed, PaneOpened, PaneSource, PortForwardId, PortForwardKind, RdpClientMessage, RdpFrame, SnippetId, SshConfigHost, TransferProgressEvent, VaultStatus, Workspace } from "./types";
+import type { AuthMethod, CollectFactsResult, ComposeResult, DockerContainer, EnvVar, Entry, ExecutionGroup, FleetOutcome, FleetRun, FleetTarget, GroupId, HostId, HostKind, ImportSelection, K8sPod, KeyAlgorithm, KeyId, KnownHostEntry, PaneListed, PaneOpened, PaneSource, PortForwardId, PortForwardKind, RdpClientMessage, RdpFrame, SnippetId, SshConfigHost, TransferProgressEvent, VaultStatus, Workspace } from "./types";
 
 /** Mirrors the 12-byte little-endian header `commands::rdp_view::connect_rdp_view`
  * writes ahead of each frame's raw RGBA8 pixels (see its doc comment for why
@@ -67,9 +67,16 @@ export const api = {
   readIconFile: (path: string) => invoke<string>("read_icon_file", { path }),
 
   exportWorkspace: (path: string, includeKeyMaterial: boolean) => invoke<void>("export_workspace", { path, includeKeyMaterial }),
-  importWorkspace: (path: string, replace: boolean) => invoke<Workspace>("import_workspace", { path, replace }),
+  /** `keepAutomation`: false (the default a caller should offer) strips
+   * `startupSnippets`/`envVars` from every imported host server-side — both
+   * run automatically on first connect with no review step, so an untrusted
+   * file could otherwise smuggle in commands that just run. See
+   * `commands::export::strip_automation`'s doc comment. */
+  importWorkspace: (path: string, replace: boolean, keepAutomation: boolean) =>
+    invoke<Workspace>("import_workspace", { path, replace, keepAutomation }),
   exportHost: (hostId: HostId, path: string, includeKeyMaterial: boolean) => invoke<void>("export_host", { hostId, path, includeKeyMaterial }),
-  importHostFromFile: (path: string) => invoke<Workspace>("import_host_from_file", { path }),
+  /** See `importWorkspace`'s `keepAutomation` doc — same reasoning, single-host import. */
+  importHostFromFile: (path: string, keepAutomation: boolean) => invoke<Workspace>("import_host_from_file", { path, keepAutomation }),
   exportText: (path: string, content: string) => invoke<void>("export_text", { path, content }),
   startForward: (forwardId: PortForwardId) => invoke<void>("start_forward", { forwardId }),
   stopForward: (forwardId: PortForwardId) => invoke<void>("stop_forward", { forwardId }),
@@ -104,6 +111,12 @@ export const api = {
     const channel = new Channel<ArrayBuffer>();
     channel.onmessage = (buffer) => onData(new Uint8Array(buffer));
     return invoke<string>("connect_docker_exec", { hostId, containerId, channel });
+  },
+  listK8sPods: (hostId: HostId) => invoke<K8sPod[]>("list_k8s_pods", { hostId }),
+  connectK8sExec: (hostId: HostId, podName: string, containerName: string | null, onData: (chunk: Uint8Array) => void) => {
+    const channel = new Channel<ArrayBuffer>();
+    channel.onmessage = (buffer) => onData(new Uint8Array(buffer));
+    return invoke<string>("connect_k8s_exec", { hostId, podName, containerName, channel });
   },
   connectRdpView: (hostId: HostId, width: number, height: number, onFrame: (frame: RdpFrame) => void) => {
     const channel = new Channel<ArrayBuffer>();
@@ -205,6 +218,12 @@ export const api = {
    * container, so there's nothing to cache facts against). */
   composeAdaptiveForDocker: (programText: string, hostId: HostId, containerId: string) =>
     invoke<ComposeResult>("compose_adaptive_for_docker", { programText, hostId, containerId }),
+
+  /** Translates `programText` for a K8s exec terminal's pod — probed fresh
+   * on every call, same reasoning as `composeAdaptiveForDocker` (a
+   * `k8sExec` host isn't tied to one pod). */
+  composeAdaptiveForK8s: (programText: string, hostId: HostId, podName: string, containerName: string | null) =>
+    invoke<ComposeResult>("compose_adaptive_for_k8s", { programText, hostId, podName, containerName }),
 
   /** Executes a reviewed preview — flattens `groups` into a per-host
    * command dispatch, streamed the same way as `runFleetCommand` (same

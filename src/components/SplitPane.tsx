@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { DockerContainer, HostId, Workspace } from "../lib/types";
+import type { DockerContainer, HostId, K8sPod, Workspace } from "../lib/types";
+import { parsePodPickerId, podPickerId } from "../lib/types";
 import type { AppPreferences } from "../lib/preferences";
 import { api } from "../lib/api";
 import { hostKindMeta } from "../lib/hostKinds";
@@ -34,12 +35,24 @@ export function SplitPane({ workspace, preferences, source, onSourceChange, onRe
   const [dockerContainerId, setDockerContainerId] = useState<string | null>(null);
   const [dockerContainers, setDockerContainers] = useState<DockerContainer[] | null>(null);
   const [dockerPickerError, setDockerPickerError] = useState<string | null>(null);
+  // Same idea as Docker exec above, one level deeper: a K8s exec host is a
+  // whole cluster context, a pod has to be picked (and, if it has more than
+  // one container, which container too) before a shell can open.
+  const [k8sPod, setK8sPod] = useState<{ podName: string; containerName: string | null } | null>(null);
+  const [k8sPods, setK8sPods] = useState<K8sPod[] | null>(null);
+  const [k8sPickerError, setK8sPickerError] = useState<string | null>(null);
   useEffect(() => {
     setDockerContainerId(null);
     setDockerContainers(null);
     setDockerPickerError(null);
+    setK8sPod(null);
+    setK8sPods(null);
+    setK8sPickerError(null);
     if (host && (host.kind ?? "ssh") === "dockerExec") {
       api.listDockerContainers(host.id).then(setDockerContainers).catch((e) => setDockerPickerError(String(e)));
+    }
+    if (host && (host.kind ?? "ssh") === "k8sExec") {
+      api.listK8sPods(host.id).then(setK8sPods).catch((e) => setK8sPickerError(String(e)));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source]);
@@ -68,9 +81,36 @@ export function SplitPane({ workspace, preferences, source, onSourceChange, onRe
           ) : !host ? (
             <div className="flex flex-1 items-center justify-center text-sm text-[var(--c-text-muted)]">Hôte introuvable</div>
           ) : kind === "k8sExec" ? (
-            <div className="flex flex-1 items-center justify-center px-8 text-center text-sm text-[var(--c-text-muted)]">
-              Kubernetes exec n'a pas encore de backend.
-            </div>
+            k8sPod ? (
+              <TerminalTab
+                key={`${source}:${k8sPod.podName}:${k8sPod.containerName ?? ""}`}
+                host={host}
+                k8sPodName={k8sPod.podName}
+                k8sContainerName={k8sPod.containerName}
+                isActive={true}
+                preferences={preferences}
+                onInputData={onInputData}
+                ref={onRef}
+              />
+            ) : (
+              <ConnectionPickerModal
+                title={`Pods Kubernetes — ${host.label}`}
+                loading={k8sPods === null && !k8sPickerError}
+                error={k8sPickerError}
+                items={(k8sPods ?? []).flatMap((pod) =>
+                  pod.containers.length > 1
+                    ? pod.containers.map((c) => ({
+                        id: podPickerId(pod.name, c),
+                        name: `${pod.name} › ${c}`,
+                        meta: `${pod.namespace} · ${pod.phase}`,
+                        up: pod.ready,
+                      }))
+                    : [{ id: podPickerId(pod.name), name: pod.name, meta: `${pod.namespace} · ${pod.phase}`, up: pod.ready }],
+                )}
+                onPick={(id) => setK8sPod(parsePodPickerId(id))}
+                onClose={() => onSourceChange("local")}
+              />
+            )
           ) : kind === "rdp" ? (
             <RdpTab key={source} host={host} isActive={true} preferences={preferences} onDisconnect={() => onSourceChange("local")} ref={onRef} />
           ) : kind === "dockerExec" ? (

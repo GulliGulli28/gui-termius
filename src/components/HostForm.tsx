@@ -93,8 +93,8 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
   // end to run against — true for SSH and Docker exec alike (both drive
   // `startup_commands` server-side, see `commands/terminal.rs`) — unlike
   // bastions/keepalive/agent-forward just above, which are SSH-protocol
-  // concepts with no Docker-exec equivalent. RDP has no shell at all.
-  const shellExtras = kind === "ssh" || kind === "dockerExec";
+  // concepts with no Docker-exec/K8s-exec equivalent. RDP has no shell at all.
+  const shellExtras = kind === "ssh" || kind === "dockerExec" || kind === "k8sExec";
   const addressLabel = kind === "k8sExec" ? "Contexte kubeconfig" : kind === "dockerExec" ? "Socket / hôte Docker" : "Adresse";
   const addressPlaceholder = kind === "dockerExec" ? "unix:///var/run/docker.sock" : kind === "k8sExec" ? "ex: docker-desktop, prod-eu-west" : undefined;
   const usernameLabel = kind === "k8sExec" ? "Namespace par défaut" : "Utilisateur";
@@ -180,7 +180,7 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
         id: host?.id ?? null, label: label.trim(), kind, address: address.trim(),
         port: 0, username: username.trim(), auth: "agent", dockerViaHostId: null,
         jumpVia: [], groupId: groupId || null,
-        tags, startupSnippets: [], envVars: [], icon, secret: null,
+        tags, startupSnippets, envVars: envVars.filter((v) => v.key.trim()), icon, secret: null,
         keepaliveIntervalSecs: null, agentForward: false,
       });
       return;
@@ -336,7 +336,7 @@ export function HostForm({ workspace, host, defaultGroupId, onCancel, onSave, on
         )}
         {kind === "k8sExec" && (
           <p className="-mt-2 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
-            Authentifié via kubeconfig, pas par adresse/port. Un cluster apparaît comme une seule entrée — la sélection du pod se fait au moment de la connexion. Non branché à un backend pour l'instant.
+            Authentifié via kubeconfig, pas par adresse/port. Un cluster apparaît comme une seule entrée — la sélection du pod (et, s'il a plusieurs conteneurs, du conteneur) se fait au moment de la connexion.
           </p>
         )}
         {showPort && (

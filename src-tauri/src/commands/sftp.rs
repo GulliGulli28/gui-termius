@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, State};
 use termius_core::docker;
 use termius_core::docker_pane::DockerPaneClient;
+use termius_core::k8s;
+use termius_core::k8s_pane::K8sPaneClient;
 use termius_core::model::HostId;
 use termius_core::sftp::{Entry, RemoteFileClient, SftpClient};
 use termius_core::ssh;
@@ -33,6 +35,18 @@ pub enum PaneSource {
         host_id: HostId,
         #[serde(rename = "containerId")]
         container_id: String,
+    },
+    /// A K8s exec host's pod filesystem — same idea as `Docker`, `pod_name`/
+    /// `container_name` picked the same way `connect_k8s_exec` picks them.
+    /// Every field needs its own explicit `rename` for the same reason as
+    /// `Docker`'s above.
+    K8s {
+        #[serde(rename = "hostId")]
+        host_id: HostId,
+        #[serde(rename = "podName")]
+        pod_name: String,
+        #[serde(rename = "containerName")]
+        container_name: Option<String>,
     },
 }
 
@@ -101,6 +115,29 @@ pub async fn open_pane(
             // container — `/` is always a valid starting point, unlike
             // guessing at a user's home which may not even exist in a
             // minimal image.
+            let cwd = "/".to_string();
+            let entries = client.list(&cwd).await.map_err(|e| e.to_string())?;
+            state.panes.lock_recover().insert(
+                pane_id.clone(),
+                Pane {
+                    connection: None,
+                    client: Some(client),
+                },
+            );
+            Ok(PaneOpened {
+                pane_id,
+                cwd,
+                entries,
+            })
+        }
+        PaneSource::K8s { host_id, pod_name, container_name } => {
+            let workspace = state.workspace.lock_recover().clone();
+            let host = workspace.host(host_id).cloned().ok_or_else(|| "hôte inconnu".to_string())?;
+            let client_conn = k8s::connect(&host.address).await.map_err(|e| e.to_string())?;
+            let client: Arc<dyn RemoteFileClient> =
+                Arc::new(K8sPaneClient::new(client_conn, host.username.clone(), pod_name, container_name));
+            // Same reasoning as the Docker arm: no SFTP-equivalent "home
+            // directory" query for an arbitrary pod, `/` always exists.
             let cwd = "/".to_string();
             let entries = client.list(&cwd).await.map_err(|e| e.to_string())?;
             state.panes.lock_recover().insert(
@@ -438,6 +475,19 @@ mod tests {
         match source {
             PaneSource::Docker { container_id, .. } => assert_eq!(container_id, "abc123"),
             _ => panic!("expected PaneSource::Docker"),
+        }
+    }
+
+    #[test]
+    fn pane_source_k8s_accepts_camel_case_field_names() {
+        let json = r#"{"kind":"k8s","hostId":"11111111-1111-1111-1111-111111111111","podName":"api-7d9f8b6c-x2kq9","containerName":"api"}"#;
+        let source: PaneSource = serde_json::from_str(json).expect("camelCase podName/containerName must deserialize");
+        match source {
+            PaneSource::K8s { pod_name, container_name, .. } => {
+                assert_eq!(pod_name, "api-7d9f8b6c-x2kq9");
+                assert_eq!(container_name.as_deref(), Some("api"));
+            }
+            _ => panic!("expected PaneSource::K8s"),
         }
     }
 }

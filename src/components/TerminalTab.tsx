@@ -38,9 +38,14 @@ interface TerminalTabProps {
   onInputData?: (data: string) => void;
   /** When set, execs into this Docker container on `host` instead of opening an SSH shell. */
   dockerContainerId?: string;
+  /** When set, execs into this pod (and, if given, container) on `host`
+   * instead of opening an SSH shell — mutually exclusive with
+   * `dockerContainerId`, both come from `host.kind`. */
+  k8sPodName?: string;
+  k8sContainerName?: string | null;
 }
 
-export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(function TerminalTab({ host, isActive, preferences, onDisconnect, onInputData, dockerContainerId }, ref) {
+export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(function TerminalTab({ host, isActive, preferences, onDisconnect, onInputData, dockerContainerId, k8sPodName, k8sContainerName }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -174,9 +179,11 @@ export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(funct
       setStatus("connecting");
       try {
         const onData = (chunk: Uint8Array) => term.write(chunk, () => ghost.handleOutputWritten());
-        const id = dockerContainerId
-          ? await api.connectDockerExec(host.id, dockerContainerId, onData)
-          : await api.connectTerminal(host.id, onData);
+        const id = k8sPodName
+          ? await api.connectK8sExec(host.id, k8sPodName, k8sContainerName ?? null, onData)
+          : dockerContainerId
+            ? await api.connectDockerExec(host.id, dockerContainerId, onData)
+            : await api.connectTerminal(host.id, onData);
         if (disposed) {
           api.closeTerminal(id).catch(() => {});
           return;
@@ -216,7 +223,7 @@ export const TerminalTab = forwardRef<TerminalTabHandle, TerminalTabProps>(funct
       if (sessionIdRef.current) api.closeTerminal(sessionIdRef.current).catch(() => {});
       term.dispose();
     };
-  }, [host.id, dockerContainerId]);
+  }, [host.id, dockerContainerId, k8sPodName, k8sContainerName]);
 
   // Re-fit whenever the container is resized (and is visible).
   useEffect(() => {

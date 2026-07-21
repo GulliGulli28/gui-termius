@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { DockerContainer, ExecutionGroup, FleetOutcome, FleetRun, FleetTarget, Host, HostFacts, HostId, Snippet, SnippetId, Workspace } from "../lib/types";
+import type { DockerContainer, ExecutionGroup, FleetOutcome, FleetRun, FleetTarget, Host, HostFacts, HostId, K8sPod, Snippet, SnippetId, Workspace } from "../lib/types";
 import { fleetTargetKey } from "../lib/types";
 import { api, onFleetDone, onFleetOutcome } from "../lib/api";
 import { formatRelativeTime } from "../lib/format";
@@ -88,6 +88,10 @@ function targetLabel(t: FleetTarget, hostById: Map<HostId, Host>, dockerContaine
   if (t.kind === "local") return "Terminal local";
   if (t.kind === "ssh") return hostById.get(t.hostId)?.label ?? t.hostId;
   const host = hostById.get(t.hostId);
+  if (t.kind === "k8s") {
+    const name = t.containerName ? `${t.podName} › ${t.containerName}` : t.podName;
+    return host ? `${name} (${host.label})` : name;
+  }
   const container = dockerContainers.get(t.hostId)?.find((c) => c.id === t.containerId);
   const name = container?.name ?? t.containerId.slice(0, 12);
   return host ? `${name} (${host.label})` : name;
@@ -124,6 +128,7 @@ function StatusDot({ status }: { status: RowStatus }) {
 export function FleetTab({ workspace, onError, onWorkspaceUpdate }: FleetTabProps) {
   const sshHosts = useMemo(() => workspace.hosts.filter((h) => h.kind === "ssh"), [workspace.hosts]);
   const dockerHosts = useMemo(() => workspace.hosts.filter((h) => h.kind === "dockerExec"), [workspace.hosts]);
+  const k8sHosts = useMemo(() => workspace.hosts.filter((h) => h.kind === "k8sExec"), [workspace.hosts]);
   const hostById = useMemo(() => new Map(workspace.hosts.map((h) => [h.id, h])), [workspace.hosts]);
   const groupName = (h: Host) => (h.groupId ? workspace.groups.find((g) => g.id === h.groupId)?.name ?? "" : "");
 
@@ -152,8 +157,33 @@ export function FleetTab({ workspace, onError, onWorkspaceUpdate }: FleetTabProp
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { refreshContainers(); }, [dockerHosts.map((h) => h.id).join(",")]);
 
+  // Same idea, one level deeper: a K8s pod may have more than one container,
+  // each a distinct exec target — flattened into one entry per container
+  // (or per pod, if it only has one) rather than a separate picker step.
+  const [k8sPods, setK8sPods] = useState<Map<HostId, K8sPod[]>>(new Map());
+  const [loadingPods, setLoadingPods] = useState(false);
+  const refreshPods = async () => {
+    if (k8sHosts.length === 0) return;
+    setLoadingPods(true);
+    const next = new Map<HostId, K8sPod[]>();
+    await Promise.all(
+      k8sHosts.map(async (h) => {
+        try {
+          next.set(h.id, (await api.listK8sPods(h.id)).filter((p) => p.ready));
+        } catch {
+          next.set(h.id, []);
+        }
+      }),
+    );
+    setK8sPods(next);
+    setLoadingPods(false);
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { refreshPods(); }, [k8sHosts.map((h) => h.id).join(",")]);
+
   // Every selectable target: a single fixed "Terminal local", every SSH
-  // host, and every live-listed Docker container (grouped under its host).
+  // host, every live-listed Docker container, and every live-listed K8s
+  // pod/container (each grouped under its host).
   const allTargets = useMemo<FleetTargetInfo[]>(() => {
     const items: FleetTargetInfo[] = [{ key: "local", target: { kind: "local" }, label: "Terminal local", sub: "" }];
     for (const h of sshHosts) {
@@ -176,9 +206,22 @@ export function FleetTab({ workspace, onError, onWorkspaceUpdate }: FleetTabProp
         });
       }
     }
+    for (const h of k8sHosts) {
+      for (const p of k8sPods.get(h.id) ?? []) {
+        const containerNames = p.containers.length > 1 ? p.containers : [null];
+        for (const containerName of containerNames) {
+          items.push({
+            key: fleetTargetKey({ kind: "k8s", hostId: h.id, podName: p.name, containerName }),
+            target: { kind: "k8s", hostId: h.id, podName: p.name, containerName },
+            label: containerName ? `${p.name} › ${containerName}` : p.name,
+            sub: `${h.label} · ${p.namespace}`,
+          });
+        }
+      }
+    }
     return items;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sshHosts, dockerHosts, dockerContainers, workspace.groups]);
+  }, [sshHosts, dockerHosts, dockerContainers, k8sHosts, k8sPods, workspace.groups]);
   const targetsByKey = useMemo(() => new Map(allTargets.map((t) => [t.key, t.target])), [allTargets]);
 
   const [filter, setFilter] = useState("");
@@ -608,7 +651,7 @@ export function FleetTab({ workspace, onError, onWorkspaceUpdate }: FleetTabProp
             />
           </div>
         </div>
-        {(sshHosts.length > 0 || dockerHosts.length > 0) && (
+        {(sshHosts.length > 0 || dockerHosts.length > 0 || k8sHosts.length > 0) && (
           <div className="mb-1 space-y-1.5 px-3 pb-1">
             {sshHosts.length > 0 && (
               <button
@@ -628,6 +671,16 @@ export function FleetTab({ workspace, onError, onWorkspaceUpdate }: FleetTabProp
               >
                 <IconRefresh size={12} className={loadingContainers ? "animate-spin" : ""} />
                 {loadingContainers ? "Actualisation…" : "Actualiser les conteneurs"}
+              </button>
+            )}
+            {k8sHosts.length > 0 && (
+              <button
+                onClick={refreshPods}
+                disabled={loadingPods}
+                className="flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--c-border)] bg-[var(--c-bg2)] px-2 py-1.5 text-xs text-[var(--c-text-secondary)] hover:bg-[var(--c-bg3)] disabled:opacity-50"
+              >
+                <IconRefresh size={12} className={loadingPods ? "animate-spin" : ""} />
+                {loadingPods ? "Actualisation…" : "Actualiser les pods"}
               </button>
             )}
             {mode === "intent" && (
@@ -703,10 +756,11 @@ export function FleetTab({ workspace, onError, onWorkspaceUpdate }: FleetTabProp
             const checked = selected.has(t.key);
             const f = t.facts;
             // In "Langage" mode, only SSH checkboxes ever become selectable
-            // (Docker exec/local aren't representable in an adaptive fleet
-            // run at all — see `run_adaptive_plan`'s doc comment), and even
-            // those stay auto-managed as long as the program has a `target`
-            // line (see `hasTargetLine`/`programHasTargetLine`).
+            // (Docker exec/K8s exec/local aren't representable in an
+            // adaptive fleet run at all — see `run_adaptive_plan`'s doc
+            // comment), and even those stay auto-managed as long as the
+            // program has a `target` line (see
+            // `hasTargetLine`/`programHasTargetLine`).
             const autoManaged = mode === "intent" && (hasTargetLine || t.target.kind !== "ssh");
             return (
               <label
