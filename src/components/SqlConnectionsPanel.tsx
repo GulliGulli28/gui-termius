@@ -1,4 +1,4 @@
-import type { SqlConnection, Workspace } from "../lib/types";
+import { sqlEngineLabel, type SqlConnection, type Workspace } from "../lib/types";
 import { IconDatabase, IconPlus, IconEdit, IconFlash } from "./ui-icons";
 
 interface SqlConnectionsPanelProps {
@@ -23,15 +23,22 @@ export function SqlConnectionsPanel({ workspace, onConnect, onNewConnection, onE
         </button>
         {workspace.sqlConnections.map((conn) => {
           const tunnelHost = conn.tunnelHostId ? workspace.hosts.find((h) => h.id === conn.tunnelHostId) : null;
+          const sqliteHost = conn.sqliteHostId ? workspace.hosts.find((h) => h.id === conn.sqliteHostId) : null;
           return (
             <div key={conn.id} className="rounded-xl border border-transparent bg-[var(--c-bg3)] p-2.5 transition-all hover:border-white/15">
               <div className="flex items-center gap-2">
                 <IconDatabase size={14} className="shrink-0 text-[var(--c-text-faint)]" />
                 <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--c-text)]">{conn.label}</span>
               </div>
-              <p className="mt-0.5 pl-[22px] text-[10px] text-[var(--c-text-muted)]">
-                {conn.engine === "mysql" ? "MySQL" : "PostgreSQL"} · <span className="font-mono">{conn.address}:{conn.port}</span>
+              <p className="mt-0.5 truncate pl-[22px] text-[10px] text-[var(--c-text-muted)]">
+                {sqlEngineLabel(conn.engine)} ·{" "}
+                {conn.engine === "sqlite" ? (
+                  <span className="font-mono">{conn.path}</span>
+                ) : (
+                  <span className="font-mono">{conn.address}:{conn.port}</span>
+                )}
                 {tunnelHost && <> · via {tunnelHost.label}</>}
+                {sqliteHost && <> · sur {sqliteHost.label}</>}
               </p>
               <div className="mt-2 flex gap-1">
                 <button

@@ -64,6 +64,8 @@ export const api = {
     port: number;
     username: string;
     database: string | null;
+    path: string | null;
+    sqliteHostId: HostId | null;
     groupId: GroupId | null;
     tags: string[];
     secret: string | null;
@@ -79,6 +81,14 @@ export const api = {
    * doc comment). */
   openSqlSession: (connectionId: SqlConnectionId) => invoke<{ sessionId: string; database: string | null }>("open_sql_session", { connectionId }),
   closeSqlSession: (sessionId: string) => invoke<void>("close_sql_session", { sessionId }),
+  /** Backing action for the tree's "actualiser" button — a no-op for every
+   * case but a SQLite connection backed by a remote host's file (see
+   * `core::sql::SqlSession::resync`'s doc comment): pushes local changes
+   * back if the origin file hasn't changed independently in the meantime,
+   * or pulls in the origin's new content otherwise. Call this first, then
+   * re-run whichever `listSql*` calls match what's currently visible in the
+   * tree — safe/cheap to call unconditionally regardless of engine. */
+  resyncSqlSession: (sessionId: string) => invoke<void>("resync_sql_session", { sessionId }),
   /** PostgreSQL only, and only when `openSqlSession` returned `database:
    * null` — the real list of databases on the server, via a bootstrap
    * connection to the `postgres` maintenance database. */

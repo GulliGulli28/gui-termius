@@ -1,6 +1,8 @@
 import { useState } from "react";
-import type { SqlConnection, SqlConnectionId, SqlEngine, Workspace } from "../lib/types";
+import { open } from "@tauri-apps/plugin-dialog";
+import type { HostId, SqlConnection, SqlConnectionId, SqlEngine, Workspace } from "../lib/types";
 import { IconTrash } from "./ui-icons";
+import { SqliteRemoteFilePicker } from "./SqliteRemoteFilePicker";
 
 export interface SqlConnectionFormData {
   id: SqlConnectionId | null;
@@ -11,6 +13,8 @@ export interface SqlConnectionFormData {
   port: number;
   username: string;
   database: string | null;
+  path: string | null;
+  sqliteHostId: string | null;
   groupId: null;
   tags: string[];
   secret: string | null;
@@ -25,7 +29,9 @@ interface SqlConnectionFormProps {
   onDeleteConnection?: (id: SqlConnectionId) => void;
 }
 
-const DEFAULT_PORTS: Record<SqlEngine, string> = { mysql: "3306", postgres: "5432" };
+const DEFAULT_PORTS: Record<Exclude<SqlEngine, "sqlite">, string> = { mysql: "3306", postgres: "5432" };
+
+const SQLITE_FILTERS = [{ name: "SQLite", extensions: ["sqlite", "sqlite3", "db"] }, { name: "Tous les fichiers", extensions: ["*"] }];
 
 /** Right-panel form for creating/editing a SQL connection — same slot and
  * layout as `HostForm`/`GroupForm` (see `App.tsx`'s `showRightPanel`), rather
@@ -39,19 +45,63 @@ export function SqlConnectionForm({ workspace, connection, onCancel, onSave, onD
   const [username, setUsername] = useState(connection?.username ?? "");
   const [password, setPassword] = useState("");
   const [database, setDatabase] = useState(connection?.database ?? "");
+  const [path, setPath] = useState(connection?.path ?? "");
+  const [sqliteHostId, setSqliteHostId] = useState<HostId | "">(connection?.sqliteHostId ?? "");
+  const [showRemotePicker, setShowRemotePicker] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Only switches the port if it's still at one engine's default — a custom
-  // port the user already typed in is left untouched.
+  // port the user already typed in is left untouched. No port to switch for
+  // `sqlite` (it has none — see `DEFAULT_PORTS`).
   const onEngineChange = (next: SqlEngine) => {
     setEngine(next);
-    if (Object.values(DEFAULT_PORTS).includes(port)) setPort(DEFAULT_PORTS[next]);
+    if (next !== "sqlite" && Object.values(DEFAULT_PORTS).includes(port)) setPort(DEFAULT_PORTS[next]);
+  };
+
+  const browseLocalFile = async () => {
+    const selected = await open({ title: "Sélectionner un fichier SQLite", multiple: false, directory: false, filters: SQLITE_FILTERS });
+    if (selected && typeof selected === "string") {
+      setPath(selected);
+      setSqliteHostId("");
+    }
+  };
+
+  const onRemoteFilePicked = (hostId: HostId, remotePath: string) => {
+    setPath(remotePath);
+    setSqliteHostId(hostId);
+    setShowRemotePicker(false);
   };
 
   const submit = () => {
+    if (!label.trim()) {
+      setError("Champs de connexion SQL invalides");
+      return;
+    }
+    if (engine === "sqlite") {
+      if (!path.trim()) {
+        setError("Chemin du fichier SQLite manquant");
+        return;
+      }
+      onSave({
+        id: connection?.id ?? null,
+        label: label.trim(),
+        engine,
+        tunnelHostId: null,
+        address: "",
+        port: 0,
+        username: "",
+        database: null,
+        path: path.trim(),
+        sqliteHostId: sqliteHostId || null,
+        groupId: null,
+        tags: [],
+        secret: null,
+      });
+      return;
+    }
     const p = Number(port);
-    if (!label.trim() || !address.trim() || !username.trim() || !Number.isInteger(p) || p < 1 || p > 65535) {
+    if (!address.trim() || !username.trim() || !Number.isInteger(p) || p < 1 || p > 65535) {
       setError("Champs de connexion SQL invalides");
       return;
     }
@@ -64,6 +114,8 @@ export function SqlConnectionForm({ workspace, connection, onCancel, onSave, onD
       port: p,
       username: username.trim(),
       database: database.trim() || null,
+      path: null,
+      sqliteHostId: null,
       groupId: null,
       tags: [],
       secret: password || null,
@@ -89,63 +141,96 @@ export function SqlConnectionForm({ workspace, connection, onCancel, onSave, onD
           <select value={engine} onChange={(e) => onEngineChange(e.target.value as SqlEngine)} className={selectClass}>
             <option value="mysql">MySQL</option>
             <option value="postgres">PostgreSQL</option>
+            <option value="sqlite">SQLite</option>
           </select>
         </div>
 
-        <div className="space-y-1">
-          <span className="text-xs font-medium text-[var(--c-text-secondary)]">Tunnel</span>
-          <select value={tunnelHostId} onChange={(e) => setTunnelHostId(e.target.value)} className={selectClass}>
-            <option value="">Connexion directe (pas de tunnel)</option>
-            {workspace.hosts
-              .filter((h) => (h.kind ?? "ssh") === "ssh")
-              .map((h) => (
-                <option key={h.id} value={h.id}>Tunnel SSH via {h.label}</option>
-              ))}
-          </select>
-          {tunnelHostId && (
-            <p className="px-0.5 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
-              L'adresse ci-dessous doit être joignable <em>depuis</em> cet hôte — souvent
-              127.0.0.1 si la base n'écoute qu'en local sur le serveur.
-            </p>
-          )}
-        </div>
-
-        <div className="flex gap-1.5">
-          <div className="min-w-0 flex-1 space-y-1">
-            <span className="text-xs font-medium text-[var(--c-text-secondary)]">Adresse</span>
-            <input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Adresse" className={`${inputClass} w-full font-mono`} />
+        {engine === "sqlite" ? (
+          <div className="space-y-1">
+            <span className="text-xs font-medium text-[var(--c-text-secondary)]">Fichier SQLite</span>
+            <div className="flex gap-1.5">
+              <input
+                value={path}
+                onChange={(e) => { setPath(e.target.value); setSqliteHostId(""); }}
+                placeholder="Chemin du fichier .sqlite / .db"
+                className={`${inputClass} w-full font-mono`}
+              />
+              <button type="button" onClick={browseLocalFile} className="shrink-0 rounded-md bg-[var(--c-bg3)] px-3 py-2 text-xs font-medium text-[var(--c-text-secondary)] hover:bg-white/5">
+                Parcourir…
+              </button>
+            </div>
+            <button type="button" onClick={() => setShowRemotePicker(true)} className="px-0.5 text-[11px] text-[var(--c-accent-text)] hover:underline">
+              …ou choisir un fichier sur un hôte enregistré
+            </button>
+            {sqliteHostId ? (
+              <p className="px-0.5 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
+                Sur l'hôte « {workspace.hosts.find((h) => h.id === sqliteHostId)?.label ?? "?"} » — copié
+                localement à la connexion, renvoyé automatiquement à la fermeture propre de l'onglet.
+              </p>
+            ) : (
+              <p className="px-0.5 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
+                Fichier local à cette machine.
+              </p>
+            )}
           </div>
-          <div className="w-20 shrink-0 space-y-1">
-            <span className="text-xs font-medium text-[var(--c-text-secondary)]">Port</span>
-            <input value={port} onChange={(e) => setPort(e.target.value)} placeholder="Port" inputMode="numeric" className={`${inputClass} w-full font-mono`} />
-          </div>
-        </div>
+        ) : (
+          <>
+            <div className="space-y-1">
+              <span className="text-xs font-medium text-[var(--c-text-secondary)]">Tunnel</span>
+              <select value={tunnelHostId} onChange={(e) => setTunnelHostId(e.target.value)} className={selectClass}>
+                <option value="">Connexion directe (pas de tunnel)</option>
+                {workspace.hosts
+                  .filter((h) => (h.kind ?? "ssh") === "ssh")
+                  .map((h) => (
+                    <option key={h.id} value={h.id}>Tunnel SSH via {h.label}</option>
+                  ))}
+              </select>
+              {tunnelHostId && (
+                <p className="px-0.5 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
+                  L'adresse ci-dessous doit être joignable <em>depuis</em> cet hôte — souvent
+                  127.0.0.1 si la base n'écoute qu'en local sur le serveur.
+                </p>
+              )}
+            </div>
 
-        <div className="space-y-1">
-          <span className="text-xs font-medium text-[var(--c-text-secondary)]">Utilisateur</span>
-          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Utilisateur" className={inputFullClass} />
-        </div>
+            <div className="flex gap-1.5">
+              <div className="min-w-0 flex-1 space-y-1">
+                <span className="text-xs font-medium text-[var(--c-text-secondary)]">Adresse</span>
+                <input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Adresse" className={`${inputClass} w-full font-mono`} />
+              </div>
+              <div className="w-20 shrink-0 space-y-1">
+                <span className="text-xs font-medium text-[var(--c-text-secondary)]">Port</span>
+                <input value={port} onChange={(e) => setPort(e.target.value)} placeholder="Port" inputMode="numeric" className={`${inputClass} w-full font-mono`} />
+              </div>
+            </div>
 
-        <div className="space-y-1">
-          <span className="text-xs font-medium text-[var(--c-text-secondary)]">Mot de passe</span>
-          <input
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            type="password"
-            placeholder={connection ? "Laisser vide pour ne pas changer" : "Mot de passe"}
-            className={inputFullClass}
-          />
-        </div>
+            <div className="space-y-1">
+              <span className="text-xs font-medium text-[var(--c-text-secondary)]">Utilisateur</span>
+              <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Utilisateur" className={inputFullClass} />
+            </div>
 
-        <div className="space-y-1">
-          <span className="text-xs font-medium text-[var(--c-text-secondary)]">Base de données (optionnel)</span>
-          <input value={database} onChange={(e) => setDatabase(e.target.value)} placeholder="Base de données (optionnel)" className={inputFullClass} />
-          {engine === "postgres" && !database.trim() && (
-            <p className="px-0.5 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
-              Laissé vide : la connexion listera toutes les bases du serveur au lieu d'une seule.
-            </p>
-          )}
-        </div>
+            <div className="space-y-1">
+              <span className="text-xs font-medium text-[var(--c-text-secondary)]">Mot de passe</span>
+              <input
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                type="password"
+                placeholder={connection ? "Laisser vide pour ne pas changer" : "Mot de passe"}
+                className={inputFullClass}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <span className="text-xs font-medium text-[var(--c-text-secondary)]">Base de données (optionnel)</span>
+              <input value={database} onChange={(e) => setDatabase(e.target.value)} placeholder="Base de données (optionnel)" className={inputFullClass} />
+              {engine === "postgres" && !database.trim() && (
+                <p className="px-0.5 text-[11px] leading-relaxed text-[var(--c-text-muted)]">
+                  Laissé vide : la connexion listera toutes les bases du serveur au lieu d'une seule.
+                </p>
+              )}
+            </div>
+          </>
+        )}
 
         <div className="flex gap-2 pt-2">
           <button onClick={submit} className="flex-1 rounded-md bg-[var(--c-accent)] px-3 py-2 text-sm font-medium text-white hover:bg-[var(--c-accent-hover)]">
@@ -184,6 +269,10 @@ export function SqlConnectionForm({ workspace, connection, onCancel, onSave, onD
           </div>
         )}
       </div>
+
+      {showRemotePicker && (
+        <SqliteRemoteFilePicker workspace={workspace} onCancel={() => setShowRemotePicker(false)} onSelect={onRemoteFilePicked} />
+      )}
     </div>
   );
 }

@@ -90,6 +90,6 @@ async fn run(workspace: &termius_core::model::Workspace, conn: &SqlConnection) -
         }
     }
 
-    session.close().await;
+    session.close().await?;
     Ok(())
 }

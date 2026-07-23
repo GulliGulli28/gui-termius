@@ -350,7 +350,6 @@ export default function App() {
           onClose={requestCloseTab}
           onToggleSplit={toggleSplit}
           onToggleBroadcast={toggleBroadcastMode}
-          onOpenFleet={openFleet}
           onReorder={setTabs}
           tabColor={tabColor}
         />
@@ -411,6 +410,7 @@ export default function App() {
             onConnectSql={(conn) => openSql(conn)}
             onNewSqlConnection={() => { setEditingSqlConnection("new"); setEditingHost(null); setEditingGroup(null); }}
             onEditSqlConnection={(conn) => { setEditingSqlConnection(conn); setEditingHost(null); setEditingGroup(null); }}
+            onOpenFleet={openFleet}
             onError={reportError}
             preferences={preferences}
             onPreferencesChange={updatePreferences}

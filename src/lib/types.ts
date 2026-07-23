@@ -168,25 +168,50 @@ export interface Group {
   color?: string | null;
 }
 
-/** Which SQL wire protocol a `SqlConnection` speaks. */
-export type SqlEngine = "mysql" | "postgres";
+/** Which SQL engine a `SqlConnection` speaks. Unlike MySQL/PostgreSQL,
+ * `sqlite` has no server/wire protocol — a connection uses `path`/
+ * `sqliteHostId` instead of `address`/`port`/`username`/`database`. */
+export type SqlEngine = "mysql" | "postgres" | "sqlite";
 
-/** A saved MySQL/PostgreSQL connection — deliberately not a `Host`/
+export function sqlEngineLabel(engine: SqlEngine): string {
+  switch (engine) {
+    case "mysql": return "MySQL";
+    case "postgres": return "PostgreSQL";
+    case "sqlite": return "SQLite";
+  }
+}
+
+/** A saved MySQL/PostgreSQL/SQLite connection — deliberately not a `Host`/
  * `HostKind` (see `core::model::SqlConnection`'s doc comment): no shell, not
  * a fleet target. Can still reference a saved SSH `Host` via
- * `tunnelHostId`, purely to reach a database that isn't directly reachable
- * from this machine — `null`/absent connects directly to `address`/`port`. */
+ * `tunnelHostId`/`sqliteHostId`, purely to reach a database that isn't
+ * directly reachable from this machine — `null`/absent connects directly
+ * (`address`/`port` for MySQL/PostgreSQL, a local file for SQLite). */
 export interface SqlConnection {
   id: SqlConnectionId;
   label: string;
   engine: SqlEngine;
+  /** MySQL/PostgreSQL only. */
   tunnelHostId?: HostId | null;
+  /** MySQL/PostgreSQL only — empty for `sqlite`. */
   address: string;
+  /** MySQL/PostgreSQL only — `0` for `sqlite`. */
   port: number;
+  /** MySQL/PostgreSQL only — empty for `sqlite`. */
   username: string;
-  /** Required in practice for PostgreSQL (a connection always targets one
-   * database); optional for MySQL. */
+  /** MySQL/PostgreSQL only. Required in practice for PostgreSQL (a
+   * connection always targets one database); optional for MySQL. Always
+   * `null` for `sqlite`. */
   database?: string | null;
+  /** `sqlite` only — the file's absolute path, local to this machine when
+   * `sqliteHostId` is unset, or a path on that host's filesystem otherwise. */
+  path?: string | null;
+  /** `sqlite` only. `null`/absent: `path` is a local file. Set: `path`
+   * lives on that saved host instead, fetched over SFTP into a local temp
+   * copy when the connection is opened and written back on a clean close —
+   * deliberately a separate field from `tunnelHostId` (an SSH *tunnel to a
+   * TCP port*, not an SFTP *file fetch*, are genuinely different things). */
+  sqliteHostId?: HostId | null;
   groupId?: GroupId | null;
   tags: string[];
 }

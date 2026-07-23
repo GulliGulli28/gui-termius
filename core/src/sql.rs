@@ -48,6 +48,20 @@
 //! mirrors the same verified-compatibility approach but has not had the
 //! same live test yet.
 //!
+//! **SQLite is a third, structurally different engine.** MySQL/PostgreSQL
+//! are servers this module dials over TCP (optionally through an SSH
+//! tunnel); SQLite is an embedded single-file engine with no server or wire
+//! protocol at all. A [`SqlConnection`] with `engine: Sqlite` uses `path`/
+//! `sqlite_host_id` instead of `address`/`port`/`username`/`database` (see
+//! those fields' doc comments): a local file is opened directly, a file on a
+//! saved host's filesystem is fetched whole over SFTP into a local temp copy
+//! at [`connect`] time and — since there's no way to run SQL against it
+//! remotely — queried entirely against that copy, written back to the
+//! original path only on a clean [`SqlSession::close`] (see [`connect_sqlite`]).
+//! [`list_schemas`] reflects SQLite's single implicit schema as one `"main"`
+//! entry, so the same tree UI that browses MySQL databases/PostgreSQL
+//! schemas works unmodified.
+//!
 //! **Other known limitations, accepted for a first version:**
 //! - No primary-key/index information in [`list_columns`] — name/type/
 //!   nullability only, to keep the introspection query itself simple and
@@ -60,18 +74,25 @@
 //!   already treats "small/bounded" vs. "hot path" data going to the
 //!   frontend (`docs/dev-history.md`'s RDP-frames section spells out that
 //!   threshold).
+//! - A remote-hosted SQLite file's changes only reach the origin host if the
+//!   session is closed cleanly — an app crash/kill between `connect` and
+//!   `close` loses them (same accepted tradeoff `SqlSession`'s doc comment
+//!   already states for the MySQL/PostgreSQL tunnel case).
 use crate::model::{PortForward, PortForwardKind, SqlConnection, SqlEngine, Workspace};
 use crate::port_forward::{self, ActiveForward};
+use crate::sftp::SftpClient;
 use crate::ssh::{self, Connection};
 use crate::vault::{self, SecretKind};
 use futures_util::TryStreamExt;
 use serde::Serialize;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::types::{Decimal, Uuid};
 use sqlx::{Column, Row};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// The live pool behind a [`SqlSession`] — see this module's doc comment for
 /// why this is a real per-engine pool rather than `sqlx::AnyPool`.
@@ -79,6 +100,7 @@ use std::sync::Arc;
 pub enum SqlPool {
     Postgres(PgPool),
     Mysql(MySqlPool),
+    Sqlite(SqlitePool),
 }
 
 impl SqlPool {
@@ -86,6 +108,7 @@ impl SqlPool {
         match self {
             SqlPool::Postgres(pool) => pool.close().await,
             SqlPool::Mysql(pool) => pool.close().await,
+            SqlPool::Sqlite(pool) => pool.close().await,
         }
     }
 }
@@ -108,13 +131,79 @@ pub struct DialTarget {
     password: Option<String>,
 }
 
-/// A live SQL connection: the pool, plus — when tunnelled — the SSH
-/// connection and forward keeping the tunnel open for as long as the pool
-/// is. Dropping this without calling [`close`](SqlSession::close) first
-/// leaves the tunnel's accept loop running detached: `ActiveForward` has no
-/// `Drop`-based teardown by design (see its doc comment), so `close()` must
-/// be called explicitly — exactly like `commands::forward::stop_forward`
-/// already has to for a persisted tunnel.
+/// Held only for a `Sqlite` [`SqlSession`] whose file lives on a saved
+/// host's filesystem rather than locally — keeps the SSH connection alive
+/// for the whole session (the SFTP channel needs it) purely so
+/// [`SqlSession::close`] can write the local temp copy (queried against for
+/// the entire session — see this module's doc comment) back to
+/// `remote_path` before it's deleted. `snapshot_hash` exists solely so
+/// `close()` can tell (a) whether the local copy was actually touched during
+/// the session at all, and (b) whether the origin file changed on the host
+/// in the meantime — see `close()`'s doc comment for why both checks matter
+/// (a real data-loss bug this module used to have: a read-only session still
+/// unconditionally re-uploaded its untouched local copy, silently clobbering
+/// whatever had changed on the host since connect time). A content hash
+/// rather than size/mtime: SQLite files are page-aligned (a tiny edit often
+/// doesn't change the file's length at all) and mtime alone can collide
+/// within the same wall-clock second on some filesystems — neither is
+/// reliable enough for a check whose entire purpose is not silently losing
+/// data.
+struct SqliteRemote {
+    _connection: Arc<Connection>,
+    client: SftpClient,
+    remote_path: String,
+    local_path: std::path::PathBuf,
+    snapshot_hash: u64,
+}
+
+/// Cheap non-cryptographic content hash (`SipHash` via `DefaultHasher`) —
+/// only ever used to detect incidental change vs. no change on our own
+/// fetched files, never anything security-sensitive, so collision-resistance
+/// against a deliberate adversary doesn't matter here.
+async fn hash_file(path: &std::path::Path) -> std::io::Result<u64> {
+    use std::hash::{Hash, Hasher};
+    let bytes = tokio::fs::read(path).await?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Ok(hasher.finish())
+}
+
+/// `true` when `remote`'s local temp copy has been touched since it was
+/// downloaded (or couldn't even be hashed — treated conservatively as "yes,
+/// assume changed": a spurious sync is much cheaper than a spurious
+/// overwrite). Shared by [`SqlSession::close`] and [`SqlSession::resync`] —
+/// both need to know this before deciding whether there's anything to push.
+async fn local_copy_changed(remote: &SqliteRemote) -> bool {
+    match hash_file(&remote.local_path).await {
+        Ok(hash) => hash != remote.snapshot_hash,
+        Err(_) => true,
+    }
+}
+
+/// Re-downloads the origin file fresh into `dest` and returns its content
+/// hash — `None` covers every "couldn't check" case alike: gone/renamed on
+/// the host, or some I/O step along the way failing. Callers that only need
+/// a yes/no compare the result against `remote.snapshot_hash` themselves;
+/// [`SqlSession::resync`] additionally reuses `dest`'s freshly-downloaded
+/// bytes directly when the hash *doesn't* match, rather than downloading a
+/// third time just to adopt what it already just fetched.
+async fn fetch_remote_hash(remote: &SqliteRemote, parent_dir: &str, file_name: &str, dest: &std::path::Path) -> Option<u64> {
+    let entries = remote.client.list(parent_dir).await.ok()?;
+    let entry = entries.into_iter().find(|e| e.name == file_name)?;
+    let cancel = AtomicBool::new(false);
+    remote.client.download(&remote.remote_path, dest, entry.size, &cancel, |_, _| {}).await.ok()?;
+    hash_file(dest).await.ok()
+}
+
+/// A live SQL connection: the pool, plus — when tunnelled (MySQL/PostgreSQL)
+/// or backed by a remote file (SQLite, see [`SqliteRemote`]) — whatever's
+/// needed to keep that alive for as long as the pool is. Dropping this
+/// without calling [`close`](SqlSession::close) first leaves the tunnel's
+/// accept loop running detached (`ActiveForward` has no `Drop`-based
+/// teardown by design, see its doc comment) and/or a modified SQLite file
+/// never written back to its origin host — `close()` must be called
+/// explicitly, exactly like `commands::forward::stop_forward` already has to
+/// for a persisted tunnel.
 pub struct SqlSession {
     pub pool: SqlPool,
     /// The database `pool` is actually scoped to — `None` only in the
@@ -123,19 +212,158 @@ pub struct SqlSession {
     /// can enumerate real ones; the frontend shows a database picker instead
     /// of a schema tree until [`SqlSession::replace_pool`] is called via the
     /// `switch_sql_database` command. Always `Some` for MySQL (it lists
-    /// every database up front regardless — see this module's doc comment)
-    /// and for PostgreSQL connections with an explicit database configured.
+    /// every database up front regardless — see this module's doc comment),
+    /// for PostgreSQL connections with an explicit database configured, and
+    /// for `Sqlite` (always `Some("main")`).
     pub database: Option<String>,
     dial: DialTarget,
     tunnel: Option<(Arc<Connection>, ActiveForward)>,
+    sqlite_remote: Option<SqliteRemote>,
 }
 
 impl SqlSession {
-    pub async fn close(self) {
+    /// Closes the pool and tears down whatever kept it reachable. For a
+    /// `Sqlite` session backed by a remote file, this is also the *only*
+    /// point where the local copy is written back to the origin host — and
+    /// only when there's actually something to write back:
+    ///
+    /// 1. If the local copy hashes the same as what was downloaded (a
+    ///    read-only browsing session — nothing in `sql::execute_query` ever
+    ///    ran, or only `SELECT`s did), nothing is uploaded at all. Without
+    ///    this check, closing *any* session — even one that only ever
+    ///    browsed the schema — would re-upload the untouched local copy and
+    ///    silently overwrite whatever had changed on the host since connect
+    ///    time (a real bug this module used to have).
+    /// 2. If the local copy *was* modified, the origin file is downloaded
+    ///    again (to a throwaway scratch path) and hashed against the same
+    ///    snapshot. If it no longer matches (someone/something else wrote to
+    ///    it on the host while this session was open), the upload is refused
+    ///    rather than blindly overwritten — this is a whole-file
+    ///    download/upload round trip, not a merge, so there's no safe way to
+    ///    reconcile two independent sets of changes. The local temp copy is
+    ///    deliberately left in place in that case (path included in the
+    ///    error) rather than discarding the only copy of whatever changed
+    ///    locally.
+    pub async fn close(self) -> anyhow::Result<()> {
         self.pool.close().await;
         if let Some((connection, active)) = self.tunnel {
             active.stop(&connection).await;
         }
+        if let Some(remote) = self.sqlite_remote {
+            if !local_copy_changed(&remote).await {
+                let _ = tokio::fs::remove_file(&remote.local_path).await;
+                return Ok(());
+            }
+
+            let (parent_dir, file_name) = split_remote_path(&remote.remote_path)?;
+            let scratch = std::env::temp_dir().join(format!("guiterm-sqlite-check-{}.db", uuid::Uuid::new_v4()));
+            let remote_unchanged = fetch_remote_hash(&remote, &parent_dir, &file_name, &scratch).await == Some(remote.snapshot_hash);
+            let _ = tokio::fs::remove_file(&scratch).await;
+            if !remote_unchanged {
+                return Err(anyhow::anyhow!(
+                    "le fichier « {} » a changé sur l'hôte distant depuis l'ouverture de cette connexion — vos modifications locales n'ont pas été renvoyées, pour ne pas écraser un changement distant concurrent (copie locale conservée dans {})",
+                    remote.remote_path,
+                    remote.local_path.display(),
+                ));
+            }
+
+            let cancel = AtomicBool::new(false);
+            match remote.client.upload(&remote.local_path, &remote.remote_path, &cancel, |_, _| {}).await {
+                Ok(()) => { let _ = tokio::fs::remove_file(&remote.local_path).await; }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "échec du renvoi du fichier SQLite modifié vers « {} » : {e} (copie locale conservée dans {})",
+                        remote.remote_path,
+                        remote.local_path.display(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The "actualiser l'arborescence" button's backing action, for the one
+    /// engine where the tree's own data can otherwise go stale without any
+    /// query ever running: a `Sqlite` session backed by a remote file only
+    /// ever reflects whatever was true on the host at *connect* time — the
+    /// tree for every other case (MySQL/PostgreSQL, or a local SQLite file)
+    /// always queries live, so a no-op here is exactly right for them
+    /// (`sqlite_remote` is `None`) and the frontend can call this
+    /// unconditionally before re-fetching the tree regardless of engine.
+    ///
+    /// Deliberately *not* pushed after every mutating query instead of only
+    /// here: that would mean a full upload-then-download-to-verify round
+    /// trip over SFTP per query (this same conflict check, just far more
+    /// often) — fine for an occasional explicit "sync now", not for every
+    /// keystroke's worth of typing a query.
+    ///
+    /// - Local copy unmodified since connect (or since the last `resync`):
+    ///   pulls in whatever's now on the host, if anything — swapping in a
+    ///   fresh local copy and reopening the pool only if it actually
+    ///   changed, a no-op otherwise.
+    /// - Local copy modified: tries to push it back, with the exact same
+    ///   conflict check `close()` uses (refuses rather than overwrites a
+    ///   remote file that also changed independently) — on success, the
+    ///   pushed copy becomes the new baseline for future syncs/close.
+    pub async fn resync(&mut self) -> anyhow::Result<()> {
+        let Some(remote) = self.sqlite_remote.as_ref() else { return Ok(()) };
+        let (parent_dir, file_name) = split_remote_path(&remote.remote_path)?;
+
+        if local_copy_changed(remote).await {
+            let scratch = std::env::temp_dir().join(format!("guiterm-sqlite-check-{}.db", uuid::Uuid::new_v4()));
+            let remote_unchanged = fetch_remote_hash(remote, &parent_dir, &file_name, &scratch).await == Some(remote.snapshot_hash);
+            let _ = tokio::fs::remove_file(&scratch).await;
+            if !remote_unchanged {
+                anyhow::bail!(
+                    "le fichier « {} » a changé sur l'hôte distant depuis l'ouverture de cette connexion — vos modifications locales n'ont pas été renvoyées, pour ne pas écraser un changement distant concurrent (copie locale conservée dans {})",
+                    remote.remote_path,
+                    remote.local_path.display(),
+                );
+            }
+            let cancel = AtomicBool::new(false);
+            remote.client.upload(&remote.local_path, &remote.remote_path, &cancel, |_, _| {}).await.map_err(|e| {
+                anyhow::anyhow!("échec du renvoi du fichier SQLite modifié vers « {} » : {e} (copie locale conservée dans {})", remote.remote_path, remote.local_path.display())
+            })?;
+            // The just-uploaded local copy is now, by construction, exactly
+            // what's on the host — no need to re-download it back.
+            let new_hash = hash_file(&remote.local_path).await?;
+            self.sqlite_remote.as_mut().expect("checked Some above").snapshot_hash = new_hash;
+            return Ok(());
+        }
+
+        // Local copy untouched — see if the host has moved on without us.
+        let fresh_path = std::env::temp_dir().join(format!("guiterm-sqlite-{}.db", uuid::Uuid::new_v4()));
+        crate::secure_file::create_private(&fresh_path)?;
+        let Some(fresh_hash) = fetch_remote_hash(remote, &parent_dir, &file_name, &fresh_path).await else {
+            let _ = tokio::fs::remove_file(&fresh_path).await;
+            anyhow::bail!("impossible de vérifier l'état du fichier « {} » sur l'hôte distant", remote.remote_path);
+        };
+        if fresh_hash == remote.snapshot_hash {
+            // Nothing changed on the host either — the fresh download was
+            // redundant, nothing to swap in.
+            let _ = tokio::fs::remove_file(&fresh_path).await;
+            return Ok(());
+        }
+
+        // Something new is there — reopen the pool against the fresh copy
+        // before touching anything else, so a failure here leaves the
+        // session exactly as it was (still usable against the old copy).
+        let options = SqliteConnectOptions::new().filename(&fresh_path).create_if_missing(false);
+        let new_pool = match SqlitePoolOptions::new().max_connections(4).connect_with(options).await {
+            Ok(pool) => pool,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&fresh_path).await;
+                return Err(e.into());
+            }
+        };
+        let old_local_path = remote.local_path.clone();
+        let old_pool = std::mem::replace(&mut self.pool, SqlPool::Sqlite(new_pool));
+        old_pool.close().await;
+        let _ = tokio::fs::remove_file(&old_local_path).await;
+        let remote_mut = self.sqlite_remote.as_mut().expect("checked Some above");
+        remote_mut.local_path = fresh_path;
+        remote_mut.snapshot_hash = fresh_hash;
+        Ok(())
     }
 
     pub fn dial(&self) -> DialTarget {
@@ -153,10 +381,14 @@ impl SqlSession {
     }
 }
 
+/// Never actually called with `SqlEngine::Sqlite` — `open_database` bails
+/// before reaching `build_url` for it (SQLite has no TCP scheme/URL to
+/// build), but the match still has to be exhaustive.
 fn scheme(engine: SqlEngine) -> &'static str {
     match engine {
         SqlEngine::Mysql => "mysql",
         SqlEngine::Postgres => "postgres",
+        SqlEngine::Sqlite => "sqlite",
     }
 }
 
@@ -192,7 +424,14 @@ const POSTGRES_BOOTSTRAP_DATABASE: &str = "postgres";
 /// built in memory with `bind_port: 0` (OS-assigned, via
 /// `ActiveForward::bound_addr`) and lives only inside the returned
 /// `SqlSession`, torn down by `SqlSession::close`.
+///
+/// `Sqlite` is dispatched to [`connect_sqlite`] instead — an embedded
+/// single-file engine has no TCP dial/tunnel to set up here at all (see this
+/// module's doc comment).
 pub async fn connect(workspace: &Workspace, conn: &SqlConnection) -> anyhow::Result<SqlSession> {
+    if conn.engine == SqlEngine::Sqlite {
+        return connect_sqlite(workspace, conn).await;
+    }
     let password = vault::load(conn.id, SecretKind::SqlPassword)?;
 
     let (dial_host, dial_port, tunnel) = match conn.tunnel_host_id {
@@ -233,7 +472,7 @@ pub async fn connect(workspace: &Workspace, conn: &SqlConnection) -> anyhow::Res
         }
     };
 
-    Ok(SqlSession { pool, database: requested_database, dial, tunnel })
+    Ok(SqlSession { pool, database: requested_database, dial, tunnel, sqlite_remote: None })
 }
 
 /// Opens a fresh pool for `database` against an already-resolved dial
@@ -242,12 +481,110 @@ pub async fn connect(workspace: &Workspace, conn: &SqlConnection) -> anyhow::Res
 /// (`commands::sql::switch_sql_database`), which PostgreSQL requires since a
 /// single connection can't change database once established (unlike
 /// MySQL's `USE`, which is why MySQL never needs this function at all).
+/// Never called for `Sqlite` — nothing in the frontend ever triggers a
+/// database switch for it (`SqlSession::database` is always `Some` from the
+/// start, see its doc comment), so this only needs to fail loudly if it ever
+/// somehow were.
 pub async fn open_database(dial: &DialTarget, database: &str) -> anyhow::Result<SqlPool> {
+    // Checked before `build_url` (which has no meaningful "sqlite" scheme to
+    // build a URL for in the first place) rather than after.
+    if dial.engine == SqlEngine::Sqlite {
+        anyhow::bail!("switch_sql_database ne s'applique pas à SQLite");
+    }
     let url = build_url(dial.engine, &dial.host, dial.port, &dial.username, dial.password.as_deref(), Some(database))?;
     match dial.engine {
         SqlEngine::Postgres => Ok(SqlPool::Postgres(PgPoolOptions::new().max_connections(4).connect(url.as_str()).await?)),
         SqlEngine::Mysql => Ok(SqlPool::Mysql(MySqlPoolOptions::new().max_connections(4).connect(url.as_str()).await?)),
+        SqlEngine::Sqlite => unreachable!("returned above"),
     }
+}
+
+/// The `main` schema every SQLite connection has implicitly — used by
+/// [`list_schemas`]/[`connect_sqlite`] so a single-file database still fits
+/// the "list of schemas, each with tables" tree shape the frontend already
+/// renders for MySQL/PostgreSQL, without a real multi-schema concept behind
+/// it (SQLite's `ATTACH DATABASE` could add more, but a plain single-file
+/// connection never does).
+const SQLITE_MAIN_SCHEMA: &str = "main";
+
+/// Splits an absolute remote POSIX path into `(parent_dir, file_name)` — used
+/// by [`connect_sqlite`]/[`SqlSession::close`] to `list()` the parent
+/// directory and look up the file's own entry (size/mtime), since
+/// `RemoteFileClient` has no single-file `stat`, only directory listing.
+fn split_remote_path(path: &str) -> anyhow::Result<(String, String)> {
+    let trimmed = path.trim_end_matches('/');
+    let idx = trimmed.rfind('/').ok_or_else(|| anyhow::anyhow!("chemin distant invalide (doit être absolu) : {path:?}"))?;
+    let name = trimmed[idx + 1..].to_string();
+    if name.is_empty() {
+        anyhow::bail!("chemin distant invalide : {path:?}");
+    }
+    let parent = if idx == 0 { "/".to_string() } else { trimmed[..idx].to_string() };
+    Ok((parent, name))
+}
+
+/// Connects a `Sqlite` [`SqlConnection`] — see this module's doc comment.
+/// `conn.path` is required; `conn.sqlite_host_id`, if set, means it lives on
+/// that saved host's filesystem rather than locally, fetched whole over SFTP
+/// into a fresh private local temp file first (the SSH connection and SFTP
+/// client are kept alive on the returned session purely so `close()` can
+/// write the file back to `conn.path` on that host afterward).
+async fn connect_sqlite(workspace: &Workspace, conn: &SqlConnection) -> anyhow::Result<SqlSession> {
+    let remote_path = conn.path.clone().filter(|p| !p.is_empty()).ok_or_else(|| anyhow::anyhow!("chemin du fichier SQLite manquant"))?;
+
+    let (local_path, sqlite_remote) = match conn.sqlite_host_id {
+        None => (std::path::PathBuf::from(&remote_path), None),
+        Some(host_id) => {
+            let connection = Arc::new(ssh::connect(workspace, host_id).await?);
+            let client = SftpClient::open(&connection).await?;
+            let (parent_dir, file_name) = split_remote_path(&remote_path)?;
+            let source_entry = client
+                .list(&parent_dir)
+                .await?
+                .into_iter()
+                .find(|e| e.name == file_name)
+                .ok_or_else(|| anyhow::anyhow!("fichier introuvable sur l'hôte : {remote_path}"))?;
+            let local_path = std::env::temp_dir().join(format!("guiterm-sqlite-{}.db", uuid::Uuid::new_v4()));
+            // Pre-created 0600 so the fetched database is never briefly
+            // world-readable in a shared temp dir — same reasoning as
+            // `transfer::download_client_to_fresh_temp`.
+            crate::secure_file::create_private(&local_path)?;
+            let cancel = AtomicBool::new(false);
+            // `download` already removes its own partial output on failure.
+            client.download(&remote_path, &local_path, source_entry.size, &cancel, |_, _| {}).await?;
+            let snapshot_hash = hash_file(&local_path).await?;
+            let remote = SqliteRemote {
+                _connection: connection,
+                client,
+                remote_path: remote_path.clone(),
+                local_path: local_path.clone(),
+                snapshot_hash,
+            };
+            (local_path, Some(remote))
+        }
+    };
+
+    let options = SqliteConnectOptions::new().filename(&local_path).create_if_missing(false);
+    let pool = match SqlitePoolOptions::new().max_connections(4).connect_with(options).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            // Only ever remove `local_path` here when it's our own fetched
+            // temp copy (`sqlite_remote.is_some()`) — for a local connection
+            // it's the user's real file, never ours to delete.
+            if sqlite_remote.is_some() {
+                let _ = tokio::fs::remove_file(&local_path).await;
+            }
+            return Err(e.into());
+        }
+    };
+
+    let dial = DialTarget { engine: SqlEngine::Sqlite, host: String::new(), port: 0, username: String::new(), password: None };
+    Ok(SqlSession {
+        pool: SqlPool::Sqlite(pool),
+        database: Some(SQLITE_MAIN_SCHEMA.to_string()),
+        dial,
+        tunnel: None,
+        sqlite_remote,
+    })
 }
 
 /// Real databases on the server — PostgreSQL only. MySQL never needs this:
@@ -261,6 +598,7 @@ pub async fn list_databases(pool: &SqlPool) -> anyhow::Result<Vec<String>> {
             Ok(rows.iter().filter_map(|r| r.try_get::<String, _>(0).ok()).collect())
         }
         SqlPool::Mysql(_) => anyhow::bail!("list_databases ne s'applique qu'à PostgreSQL — MySQL liste déjà toutes ses bases via list_schemas"),
+        SqlPool::Sqlite(_) => anyhow::bail!("list_databases ne s'applique pas à SQLite — un fichier n'a qu'une seule base implicite"),
     }
 }
 
@@ -295,6 +633,8 @@ pub async fn list_schemas(pool: &SqlPool) -> anyhow::Result<Vec<String>> {
             .await?;
             Ok(rows.iter().filter_map(|r| r.try_get::<String, _>(0).ok()).collect())
         }
+        // Always exactly one entry — see `SQLITE_MAIN_SCHEMA`'s doc comment.
+        SqlPool::Sqlite(_) => Ok(vec![SQLITE_MAIN_SCHEMA.to_string()]),
     }
 }
 
@@ -326,6 +666,17 @@ pub async fn list_tables(pool: &SqlPool, schema: &str) -> anyhow::Result<Vec<Tab
             .collect(),
         SqlPool::Postgres(pool) => sqlx::query("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name")
             .bind(schema)
+            .fetch_all(pool)
+            .await?
+            .iter()
+            .map(|r| TableInfo { name: r.try_get(0).unwrap_or_default(), kind: table_kind(&r.try_get::<String, _>(1).unwrap_or_default()) })
+            .collect(),
+        // `schema` is always `SQLITE_MAIN_SCHEMA` here (the only one
+        // `list_schemas` ever returns) — `sqlite_master` has no schema
+        // column to filter by in the first place. `sqlite_%` entries are
+        // SQLite's own bookkeeping tables (e.g. `sqlite_sequence`), not
+        // user data.
+        SqlPool::Sqlite(pool) => sqlx::query("SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name")
             .fetch_all(pool)
             .await?
             .iter()
@@ -367,6 +718,24 @@ pub async fn list_columns(pool: &SqlPool, schema: &str, table: &str) -> anyhow::
                 .await?
                 .iter()
                 .map(|r| column_info(r.try_get(0).unwrap_or_default(), r.try_get(1).unwrap_or_default(), &r.try_get::<String, _>(2).unwrap_or_default()))
+                .collect()
+        }
+        // No `information_schema` in SQLite — `PRAGMA table_info` is the
+        // native equivalent. It takes a bare/quoted identifier, not a bind
+        // parameter, but `table` always comes from our own `list_tables`
+        // output (see `quote_pg_identifier`'s doc comment for the same
+        // trusted-input reasoning applied to `schema` there). `notnull` is
+        // 1 when the column is `NOT NULL`, the inverse of `nullable`.
+        SqlPool::Sqlite(pool) => {
+            sqlx::query(&format!("PRAGMA table_info({})", quote_sqlite_identifier(table)))
+                .fetch_all(pool)
+                .await?
+                .iter()
+                .map(|r| ColumnInfo {
+                    name: r.try_get(1).unwrap_or_default(),
+                    data_type: r.try_get(2).unwrap_or_default(),
+                    nullable: r.try_get::<i64, _>(3).unwrap_or_default() == 0,
+                })
                 .collect()
         }
     };
@@ -452,6 +821,28 @@ pub async fn execute_query(pool: &SqlPool, schema: Option<&str>, sql: &str) -> a
             }
             Ok(QueryResult { columns, rows, truncated })
         }
+        // No context statement needed: SQLite has a single implicit schema
+        // (`SQLITE_MAIN_SCHEMA`), so `schema` is ignored here rather than
+        // faking a `USE`/`SET search_path` equivalent that wouldn't do
+        // anything real.
+        SqlPool::Sqlite(pool) => {
+            let mut conn = pool.acquire().await?;
+            let mut stream = sqlx::query(sql).fetch(&mut *conn);
+            let mut columns: Vec<String> = Vec::new();
+            let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+            let mut truncated = false;
+            while let Some(row) = stream.try_next().await? {
+                if columns.is_empty() {
+                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                }
+                if rows.len() >= MAX_RESULT_ROWS {
+                    truncated = true;
+                    break;
+                }
+                rows.push((0..row.columns().len()).map(|i| decode_sqlite_value(&row, i)).collect());
+            }
+            Ok(QueryResult { columns, rows, truncated })
+        }
     }
 }
 
@@ -466,6 +857,13 @@ fn quote_pg_identifier(name: &str) -> String {
 
 fn quote_mysql_identifier(name: &str) -> String {
     format!("`{}`", name.replace('`', "``"))
+}
+
+/// SQLite accepts the same double-quoted identifier syntax as PostgreSQL
+/// (it's the SQL standard form) — `table` always comes from our own
+/// `list_tables` output, same trusted-input reasoning as `quote_pg_identifier`.
+fn quote_sqlite_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -601,6 +999,29 @@ fn decode_mysql_value(row: &sqlx::mysql::MySqlRow, i: usize) -> serde_json::Valu
     serde_json::Value::Null
 }
 
+/// Decodes one SQLite cell. Much simpler than the Postgres/MySQL cascades
+/// above: SQLite has dynamic per-cell typing (any column can hold any of its
+/// 5 storage classes regardless of the declared column type), and `sqlx`'s
+/// `SqliteValue` already exposes exactly that same 5-way shape, so there's no
+/// "wire type doesn't map to a Rust type" ambiguity to resolve by trying
+/// candidates in order — each `try_get` below either is the cell's actual
+/// storage class or fails outright, never a false positive.
+fn decode_sqlite_value(row: &sqlx::sqlite::SqliteRow, i: usize) -> serde_json::Value {
+    if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(i) {
+        return serde_json::json!(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(i) {
+        return serde_json::json!(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<String>, _>(i) {
+        return serde_json::Value::String(v);
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<u8>>, _>(i) {
+        return serde_json::Value::String(hex_encode(&v));
+    }
+    serde_json::Value::Null
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,5 +1059,46 @@ mod tests {
         assert_eq!(no_password.password(), None);
         let empty_password = build_url(SqlEngine::Mysql, "localhost", 3306, "root", Some(""), None).unwrap();
         assert_eq!(empty_password.password(), None);
+    }
+
+    /// Unlike the Postgres/MySQL paths above (reasoned about, no live
+    /// server to test against here), a local SQLite file needs nothing but
+    /// the filesystem — exercised for real end to end: connect, create a
+    /// table, insert a row, and read back the same schema/table/column/query
+    /// introspection the frontend's tree actually calls.
+    #[tokio::test]
+    async fn sqlite_local_file_round_trips_schema_and_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqlite");
+        // A zero-byte file is a valid (empty) SQLite database — `create_if_missing(false)`
+        // only needs the path to already exist, not to already be a real database.
+        std::fs::File::create(&path).unwrap();
+
+        let workspace = Workspace::default();
+        let mut conn = SqlConnection::new("test", SqlEngine::Sqlite, "", "");
+        conn.path = Some(path.to_string_lossy().to_string());
+
+        let session = connect(&workspace, &conn).await.unwrap();
+        assert_eq!(session.database.as_deref(), Some("main"));
+
+        execute_query(&session.pool, None, "CREATE TABLE greetings (id INTEGER PRIMARY KEY, message TEXT NOT NULL)").await.unwrap();
+        execute_query(&session.pool, None, "INSERT INTO greetings (message) VALUES ('bonjour')").await.unwrap();
+
+        assert_eq!(list_schemas(&session.pool).await.unwrap(), vec![SQLITE_MAIN_SCHEMA.to_string()]);
+
+        let tables = list_tables(&session.pool, SQLITE_MAIN_SCHEMA).await.unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, "greetings");
+        assert_eq!(tables[0].kind, "table");
+
+        let columns = list_columns(&session.pool, SQLITE_MAIN_SCHEMA, "greetings").await.unwrap();
+        assert_eq!(columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["id", "message"]);
+        assert!(!columns[1].nullable);
+
+        let result = execute_query(&session.pool, None, "SELECT id, message FROM greetings").await.unwrap();
+        assert_eq!(result.columns, vec!["id".to_string(), "message".to_string()]);
+        assert_eq!(result.rows, vec![vec![serde_json::json!(1), serde_json::json!("bonjour")]]);
+
+        session.close().await.unwrap();
     }
 }

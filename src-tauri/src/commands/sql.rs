@@ -24,6 +24,12 @@ pub struct SaveSqlConnectionInput {
     pub username: String,
     #[serde(default)]
     pub database: Option<String>,
+    /// `Sqlite` only — see `SqlConnection::path`'s doc comment.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// `Sqlite` only — see `SqlConnection::sqlite_host_id`'s doc comment.
+    #[serde(default)]
+    pub sqlite_host_id: Option<termius_core::model::HostId>,
     #[serde(default)]
     pub group_id: Option<GroupId>,
     #[serde(default)]
@@ -50,6 +56,8 @@ pub fn save_sql_connection(state: State<'_, AppState>, input: SaveSqlConnectionI
                 conn.port = input.port;
                 conn.username = input.username;
                 conn.database = input.database;
+                conn.path = input.path;
+                conn.sqlite_host_id = input.sqlite_host_id;
                 conn.group_id = input.group_id;
                 conn.tags = input.tags;
             }
@@ -60,6 +68,8 @@ pub fn save_sql_connection(state: State<'_, AppState>, input: SaveSqlConnectionI
             conn.tunnel_host_id = input.tunnel_host_id;
             conn.port = input.port;
             conn.database = input.database;
+            conn.path = input.path;
+            conn.sqlite_host_id = input.sqlite_host_id;
             conn.group_id = input.group_id;
             conn.tags = input.tags;
             let id = conn.id;
@@ -151,13 +161,43 @@ pub async fn switch_sql_database(state: State<'_, AppState>, session_id: String,
     Ok(())
 }
 
+/// For a `Sqlite` session backed by a remote file, this is also the point
+/// where the modified local copy is written back to the origin host — an
+/// `Err` here means that write-back failed (see `SqlSession::close`'s doc
+/// comment for what happens to the local copy in that case).
 #[tauri::command]
 pub async fn close_sql_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     let session = state.sql_sessions.lock_recover().remove(&session_id);
     if let Some(session) = session {
-        session.close().await;
+        session.close().await.map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Backing action for the tree's "actualiser" button — see
+/// `SqlSession::resync`'s doc comment for what this actually does (a no-op
+/// for every case but a `Sqlite` session backed by a remote file). The
+/// frontend calls this unconditionally, regardless of engine, before
+/// re-running `list_sql_schemas`/`list_sql_tables`/`list_sql_columns` for
+/// whatever's currently visible.
+///
+/// Takes the session out of the map for the duration of the (possibly slow,
+/// SFTP-bound) resync rather than holding the lock across it — same
+/// `std::sync::Mutex`-across-`.await` concern as `session_pool`'s doc
+/// comment, just for a value that has to be mutated in place instead of
+/// cheaply cloned. Re-inserted afterward regardless of the result: a failed
+/// resync (e.g. a conflict) shouldn't destroy an otherwise-still-usable
+/// session, only report the error.
+#[tauri::command]
+pub async fn resync_sql_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let mut session = state
+        .sql_sessions
+        .lock_recover()
+        .remove(&session_id)
+        .ok_or_else(|| "session SQL inconnue ou fermée".to_string())?;
+    let result = session.resync().await;
+    state.sql_sessions.lock_recover().insert(session_id, session);
+    result.map_err(|e| e.to_string())
 }
 
 /// Clones the pool (cheap — each `SqlPool` variant is `Arc`-based) out of

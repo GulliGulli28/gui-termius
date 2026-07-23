@@ -319,6 +319,20 @@ export function IconServerStack({ size = 16, className }: P) {
   );
 }
 
+/** Distinct from `IconHosts`/`IconServerStack` (both a single stacked
+ * server) — a 2x2 grid reads as "several independent machines", matching
+ * what fleet operations actually target (many hosts at once). */
+export function IconFleet({ size = 16, className }: P) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={className}>
+      <rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.1" stroke="currentColor" strokeWidth="1.25" />
+      <rect x="9" y="1.5" width="5.5" height="5.5" rx="1.1" stroke="currentColor" strokeWidth="1.25" />
+      <rect x="1.5" y="9" width="5.5" height="5.5" rx="1.1" stroke="currentColor" strokeWidth="1.25" />
+      <rect x="9" y="9" width="5.5" height="5.5" rx="1.1" stroke="currentColor" strokeWidth="1.25" />
+    </svg>
+  );
+}
+
 export function IconDatabase({ size = 16, className }: P) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={className}>

@@ -142,6 +142,7 @@ fn main() {
             commands::sql::delete_sql_connection,
             commands::sql::open_sql_session,
             commands::sql::close_sql_session,
+            commands::sql::resync_sql_session,
             commands::sql::list_sql_databases,
             commands::sql::switch_sql_database,
             commands::sql::list_sql_schemas,

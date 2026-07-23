@@ -272,49 +272,74 @@ pub struct PortForward {
     pub dest_port: u16,
 }
 
-/// Which SQL wire protocol a [`SqlConnection`] speaks — see `crate::sql`.
+/// Which SQL engine a [`SqlConnection`] speaks — see `crate::sql`. Unlike
+/// MySQL/PostgreSQL, `Sqlite` has no server/wire protocol at all: it's an
+/// embedded single-file engine, so a `SqlConnection` with this engine uses
+/// `path`/`sqlite_host_id` instead of `address`/`port`/`username`/`database`
+/// (all left empty/unused — see those fields' doc comments).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum SqlEngine {
     Mysql,
     Postgres,
+    Sqlite,
 }
 
-/// A saved MySQL/PostgreSQL connection — deliberately **not** a `Host`/
-/// `HostKind` variant: unlike SSH/Docker exec/K8s exec/RDP, a SQL connection
-/// has no shell and isn't a fleet target, so folding it into `HostKind`
-/// would force every one of those (fleet, adaptive snippets, tab restore…)
-/// to grow a "this kind has no shell" branch. It can still *reference* a
-/// saved `Host` via `tunnel_host_id`, purely to reach a database that isn't
-/// directly reachable from this machine.
+/// A saved MySQL/PostgreSQL/SQLite connection — deliberately **not** a
+/// `Host`/`HostKind` variant: unlike SSH/Docker exec/K8s exec/RDP, a SQL
+/// connection has no shell and isn't a fleet target, so folding it into
+/// `HostKind` would force every one of those (fleet, adaptive snippets, tab
+/// restore…) to grow a "this kind has no shell" branch. It can still
+/// *reference* a saved `Host` via `tunnel_host_id`/`sqlite_host_id`, purely
+/// to reach a database that isn't directly reachable from this machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SqlConnection {
     pub id: SqlConnectionId,
     pub label: String,
     pub engine: SqlEngine,
-    /// `None`: connect directly to `address`/`port`. `Some(host_id)`: open
-    /// an SSH connection to that saved host first and reach `address`/
-    /// `port` through an ephemeral local port forward (see
+    /// MySQL/PostgreSQL only. `None`: connect directly to `address`/`port`.
+    /// `Some(host_id)`: open an SSH connection to that saved host first and
+    /// reach `address`/`port` through an ephemeral local port forward (see
     /// `crate::sql::connect`) — for a database that's only reachable from
     /// that host (bound to loopback server-side, a private subnet, etc.),
     /// not necessarily "the database runs on that host".
     #[serde(default)]
     pub tunnel_host_id: Option<HostId>,
-    /// The database server's address — reachable directly from this
-    /// machine when `tunnel_host_id` is `None`, or reachable *from*
-    /// `tunnel_host_id` otherwise (often `127.0.0.1`, for a database bound
-    /// to loopback on that host).
+    /// MySQL/PostgreSQL only — the database server's address, reachable
+    /// directly from this machine when `tunnel_host_id` is `None`, or
+    /// reachable *from* `tunnel_host_id` otherwise (often `127.0.0.1`, for a
+    /// database bound to loopback on that host). Empty for `Sqlite`.
+    #[serde(default)]
     pub address: String,
+    /// MySQL/PostgreSQL only. `0` for `Sqlite`.
+    #[serde(default)]
     pub port: u16,
+    /// MySQL/PostgreSQL only. Empty for `Sqlite`.
+    #[serde(default)]
     pub username: String,
-    /// Initial database to connect to. Required in practice for
-    /// PostgreSQL (a connection always targets exactly one database, and
-    /// never switches without reconnecting — see `crate::sql`'s module
-    /// docs); optional for MySQL (a database can be selected, or switched,
-    /// per query).
+    /// MySQL/PostgreSQL only. Initial database to connect to. Required in
+    /// practice for PostgreSQL (a connection always targets exactly one
+    /// database, and never switches without reconnecting — see
+    /// `crate::sql`'s module docs); optional for MySQL (a database can be
+    /// selected, or switched, per query). Always `None` for `Sqlite`.
     #[serde(default)]
     pub database: Option<String>,
+    /// `Sqlite` only — the file's absolute path. Local to this machine when
+    /// `sqlite_host_id` is `None`; otherwise a path on that host's own
+    /// filesystem, fetched over SFTP into a local temp copy at connect time
+    /// and written back on a clean `close()` (see `crate::sql::connect`'s
+    /// doc comment).
+    #[serde(default)]
+    pub path: Option<String>,
+    /// `Sqlite` only. `None`: `path` is a local file. `Some(host_id)`:
+    /// `path` lives on that saved host instead — deliberately a separate
+    /// field from `tunnel_host_id` rather than reusing it, since the two
+    /// mean genuinely different things (an SSH *tunnel to a TCP port* vs.
+    /// an SFTP *file fetch*, with no persistent connection kept open for
+    /// the latter beyond what's needed to write the file back on close).
+    #[serde(default)]
+    pub sqlite_host_id: Option<HostId>,
     #[serde(default)]
     pub group_id: Option<GroupId>,
     #[serde(default)]
@@ -332,9 +357,12 @@ impl SqlConnection {
             port: match engine {
                 SqlEngine::Mysql => 3306,
                 SqlEngine::Postgres => 5432,
+                SqlEngine::Sqlite => 0,
             },
             username: username.into(),
             database: None,
+            path: None,
+            sqlite_host_id: None,
             group_id: None,
             tags: Vec::new(),
         }

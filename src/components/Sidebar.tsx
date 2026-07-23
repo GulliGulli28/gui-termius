@@ -2,7 +2,7 @@ import type { Group, GroupId, Host, HostId, KeyAlgorithm, KeyId, PortForwardId, 
 import type { AppPreferences } from "../lib/preferences";
 import { lazy, Suspense, type ComponentType } from "react";
 import { HostsPanel } from "./HostsPanel";
-import { IconHosts, IconSnippets, IconTunnels, IconKeychain, IconSettings, IconTransfer, IconShield, IconDatabase } from "./ui-icons";
+import { IconHosts, IconSnippets, IconTunnels, IconKeychain, IconSettings, IconTransfer, IconShield, IconDatabase, IconFleet } from "./ui-icons";
 import { TabLoadingFallback } from "./TabLoadingFallback";
 
 // Lazy-loaded: "Hôtes" is the default panel shown on launch (stays eager),
@@ -52,6 +52,7 @@ interface SidebarProps {
   onConnectSql: (conn: SqlConnection) => void;
   onNewSqlConnection: () => void;
   onEditSqlConnection: (conn: SqlConnection) => void;
+  onOpenFleet: () => void;
   onWorkspaceUpdate: (ws: Workspace) => void;
   onError: (message: string) => void;
   preferences: AppPreferences;
@@ -94,6 +95,13 @@ export function Sidebar(props: SidebarProps) {
             </button>
           );
         })}
+        <button
+          onClick={props.onOpenFleet}
+          title="Opérations de flotte — exécuter une commande sur plusieurs hôtes à la fois"
+          className="relative flex h-9 w-9 items-center justify-center rounded-lg border border-transparent text-[var(--c-text-faint)] transition-all duration-150 hover:bg-white/5 hover:text-[var(--c-text-secondary)]"
+        >
+          <IconFleet size={16} />
+        </button>
         <div className="mt-auto">
           <button
             onClick={() => onPanelChange(panel === "settings" ? "hosts" : "settings")}

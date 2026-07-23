@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../lib/api";
 import type { ColumnInfo, QueryResult, SqlCellValue, SqlConnection, TableInfo } from "../lib/types";
 import { useResizablePane } from "../hooks/useResizablePane";
@@ -7,6 +7,55 @@ import { IconChevronDown, IconChevronRight, IconDatabase, IconFolder, IconPlay, 
 interface SqlTabProps {
   connection: SqlConnection;
   onError: (message: string) => void;
+}
+
+/** Matches a query that can change what the schema tree / cached table data
+ * show (DDL, or DML that isn't a plain read) — used by `run()` below to
+ * decide whether to refresh the tree after a successful query. Deliberately
+ * keyword-based rather than a real parser: false positives just cost one
+ * extra (cheap) re-fetch, false negatives leave stale data, so erring
+ * towards matching is the safe direction. */
+const MUTATING_SQL_RE = /^\s*(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TRUNCATE|REPLACE|MERGE|GRANT|REVOKE)\b/i;
+
+const SQL_KEYWORDS = new Set([
+  "select", "from", "where", "insert", "into", "values", "update", "set", "delete", "create", "table", "drop",
+  "alter", "add", "column", "join", "left", "right", "inner", "outer", "full", "cross", "on", "and", "or", "not",
+  "null", "is", "in", "like", "ilike", "limit", "offset", "order", "by", "group", "having", "as", "distinct",
+  "case", "when", "then", "else", "end", "union", "all", "exists", "begin", "commit", "rollback", "truncate",
+  "default", "primary", "key", "foreign", "references", "unique", "index", "view", "with", "returning", "cascade",
+  "check", "constraint", "between", "asc", "desc", "using", "grant", "revoke", "replace", "merge", "if", "schema",
+  "database", "function", "procedure", "trigger", "before", "after", "for", "each", "row", "statement", "language",
+  "execute", "do", "true", "false",
+]);
+
+/** Splits `sql` into keyword/string/number/comment/plain spans for the
+ * read-only `<pre>` overlaid behind the query textarea — a lightweight
+ * regex tokenizer rather than a real SQL parser (good enough for coloring,
+ * not meant to validate syntax). */
+function highlightSql(sql: string): ReactNode[] {
+  const TOKEN_RE = /(--[^\n]*)|(\/\*[\s\S]*?\*\/)|('(?:[^']|'')*')|("(?:[^"]|"")*")|(`(?:[^`]|``)*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_]*)/g;
+  const nodes: ReactNode[] = [];
+  let lastIndex = 0;
+  let key = 0;
+  let match: RegExpExecArray | null;
+  while ((match = TOKEN_RE.exec(sql))) {
+    if (match.index > lastIndex) nodes.push(sql.slice(lastIndex, match.index));
+    const [full, comment, blockComment, singleQuoted, doubleQuoted, backtick, number, word] = match;
+    if (comment || blockComment) {
+      nodes.push(<span key={key++} className="italic text-[var(--c-text-faint)]">{full}</span>);
+    } else if (singleQuoted || doubleQuoted || backtick) {
+      nodes.push(<span key={key++} className="text-emerald-400">{full}</span>);
+    } else if (number) {
+      nodes.push(<span key={key++} className="text-amber-400">{full}</span>);
+    } else if (word && SQL_KEYWORDS.has(word.toLowerCase())) {
+      nodes.push(<span key={key++} className="font-semibold text-sky-400">{full}</span>);
+    } else {
+      nodes.push(full);
+    }
+    lastIndex = TOKEN_RE.lastIndex;
+  }
+  if (lastIndex < sql.length) nodes.push(sql.slice(lastIndex));
+  return nodes;
 }
 
 type Status = "connecting" | "connected" | "failed";
@@ -53,6 +102,7 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
   const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set());
   const [tablesBySchema, setTablesBySchema] = useState<Record<string, TableInfo[]>>({});
   const [columnsByTable, setColumnsByTable] = useState<Record<string, ColumnInfo[]>>({});
+  const [refreshingTree, setRefreshingTree] = useState(false);
 
   const [selected, setSelected] = useState<Selected>(null);
   const [activeSubTab, setActiveSubTab] = useState<"structure" | "data" | "query">("query");
@@ -69,6 +119,7 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
   const [loadingDataKey, setLoadingDataKey] = useState<string | null>(null);
 
   const [query, setQuery] = useState("");
+  const queryHighlightRef = useRef<HTMLPreElement>(null);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<QueryResult | null>(null);
   const [queryError, setQueryError] = useState<string | null>(null);
@@ -133,20 +184,34 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
       .finally(() => setLoadingDataKey((k) => (k === key ? null : k)));
   };
 
-  const toggleSchema = (schema: string) => {
+  const fetchTables = (schema: string) => {
+    if (!sessionIdRef.current) return;
+    api.listSqlTables(sessionIdRef.current, schema)
+      .then((tables) => setTablesBySchema((prev) => ({ ...prev, [schema]: tables })))
+      .catch((e) => onError(String(e)));
+  };
+
+  // Selects a schema for the "Structure" tab and makes sure it's expanded —
+  // never collapses it. Collapsing is `toggleSchemaExpand`'s job alone (the
+  // chevron button), so clicking the row itself to browse a schema/table
+  // can never surprise-close the branch you're standing in.
+  const selectSchema = (schema: string) => {
     setSelected({ kind: "schema", schema });
     setActiveSubTab("structure");
+    setExpandedSchemas((prev) => (prev.has(schema) ? prev : new Set(prev).add(schema)));
+    if (!tablesBySchema[schema]) fetchTables(schema);
+  };
+
+  // Chevron-only expand/collapse — deliberately not tied to selection so it
+  // can collapse a branch without changing what "Structure"/"Data" show.
+  const toggleSchemaExpand = (schema: string) => {
     setExpandedSchemas((prev) => {
       const next = new Set(prev);
       if (next.has(schema)) next.delete(schema);
       else next.add(schema);
       return next;
     });
-    if (!tablesBySchema[schema] && sessionIdRef.current) {
-      api.listSqlTables(sessionIdRef.current, schema)
-        .then((tables) => setTablesBySchema((prev) => ({ ...prev, [schema]: tables })))
-        .catch((e) => onError(String(e)));
-    }
+    if (!tablesBySchema[schema]) fetchTables(schema);
   };
 
   // Selects a table for the "Structure"/"Data" tabs — no expand/collapse of
@@ -189,12 +254,76 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
     setActiveSubTab("query");
   };
 
+  // After a query that can change table/row data (anything but a plain
+  // read), re-fetch every schema's table list that's already in the tree
+  // and drop cached columns/table-preview data so they're re-fetched next
+  // time they're viewed instead of showing what's now stale.
+  const refreshAfterMutation = () => {
+    Object.keys(tablesBySchema).forEach(fetchTables);
+    setColumnsByTable({});
+    setDataByTable({});
+    setDataErrorByTable({});
+  };
+
+  // Shared by `refreshTree`'s single-database and (already-active)
+  // multi-database branches: re-fetch the schema list, drop any schema the
+  // refreshed list no longer has (so a deleted one doesn't sit forever on
+  // "Chargement…"), and re-fetch tables for whichever schemas were already
+  // loaded.
+  const refreshSchemasAndTables = (sessionId: string) =>
+    api.listSqlSchemas(sessionId).then((s) => {
+      setSchemas(s);
+      const stillThere = new Set(s);
+      setExpandedSchemas((prev) => new Set(Array.from(prev).filter((schema) => stillThere.has(schema))));
+      const known = Object.keys(tablesBySchema).filter((schema) => stillThere.has(schema));
+      setTablesBySchema({});
+      known.forEach(fetchTables);
+    });
+
+  // The tree's "actualiser" button. Unlike `refreshAfterMutation` below
+  // (which only re-fetches tables already known within schemas already in
+  // the tree, right after a query that's likely to have changed them), this
+  // also re-fetches the top-level schema/database list itself, and first
+  // calls `resyncSqlSession` — a no-op for every engine except a SQLite
+  // connection backed by a remote host's file, where it's the only way to
+  // pick up a change made outside the app since this session was opened
+  // (see `core::sql::SqlSession::resync`'s doc comment).
+  const refreshTree = () => {
+    if (!sessionIdRef.current || refreshingTree) return;
+    const sessionId = sessionIdRef.current;
+    setRefreshingTree(true);
+    api.resyncSqlSession(sessionId)
+      .then(() => {
+        setColumnsByTable({});
+        setDataByTable({});
+        setDataErrorByTable({});
+        if (multiDatabase) {
+          return api.listSqlDatabases(sessionId).then((d) => {
+            setDatabases(d);
+            if (!activeDatabase || !d.includes(activeDatabase)) {
+              setActiveDatabase(null);
+              setSchemas(null);
+              setTablesBySchema({});
+              setExpandedSchemas(new Set());
+              setSelected(null);
+              return undefined;
+            }
+            return refreshSchemasAndTables(sessionId);
+          });
+        }
+        return refreshSchemasAndTables(sessionId);
+      })
+      .catch((e) => onError(String(e)))
+      .finally(() => setRefreshingTree(false));
+  };
+
   const run = () => {
     if (!sessionIdRef.current || !query.trim() || running) return;
     setRunning(true);
     setQueryError(null);
+    const isMutation = MUTATING_SQL_RE.test(query);
     api.runSqlQuery(sessionIdRef.current, query, selected?.schema ?? null)
-      .then(setResult)
+      .then((res) => { setResult(res); if (isMutation) refreshAfterMutation(); })
       .catch((e) => { setQueryError(String(e)); setResult(null); })
       .finally(() => setRunning(false));
   };
@@ -225,16 +354,26 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
       const schemaActive = selected?.kind === "schema" && selected.schema === schema;
       return (
         <div key={schema}>
-          <button
-            onClick={() => toggleSchema(schema)}
-            className={`flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-[14px] font-semibold transition-colors ${
+          <div
+            className={`flex w-full items-center gap-0.5 rounded-lg text-[14px] font-semibold transition-colors ${
               schemaActive ? "bg-[var(--c-accent-dim)] text-[var(--c-accent-text)]" : "text-[var(--c-text)] hover:bg-white/[0.07]"
             }`}
           >
-            {expandedSchemas.has(schema) ? <IconChevronDown size={13} className="shrink-0" /> : <IconChevronRight size={13} className="shrink-0" />}
-            <IconDatabase size={15} className={`shrink-0 ${schemaActive ? "text-[var(--c-accent-text)]" : "text-[var(--c-text-secondary)]"}`} />
-            <span className="min-w-0 flex-1 truncate">{schema}</span>
-          </button>
+            <button
+              onClick={() => toggleSchemaExpand(schema)}
+              title={expandedSchemas.has(schema) ? "Réduire" : "Développer"}
+              className="flex shrink-0 items-center justify-center rounded p-1.5"
+            >
+              {expandedSchemas.has(schema) ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+            </button>
+            <button
+              onClick={() => selectSchema(schema)}
+              className="flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pr-2 text-left"
+            >
+              <IconDatabase size={15} className={`shrink-0 ${schemaActive ? "text-[var(--c-accent-text)]" : "text-[var(--c-text-secondary)]"}`} />
+              <span className="min-w-0 flex-1 truncate">{schema}</span>
+            </button>
+          </div>
           {expandedSchemas.has(schema) && (
             <div className="ml-4 border-l-2 border-[var(--c-border)] pl-2.5">
               {!tablesBySchema[schema] ? (
@@ -280,6 +419,16 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
     <div className="flex min-h-0 flex-1">
       {/* Schema tree */}
       <div style={{ width: split.value }} className="sidebar-scroll flex shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-[var(--c-border)] bg-[var(--c-bg2)] p-2.5">
+        <div className="mb-0.5 flex items-center justify-end">
+          <button
+            onClick={refreshTree}
+            disabled={refreshingTree}
+            title="Actualiser l'arborescence"
+            className="flex shrink-0 items-center justify-center rounded p-1 text-[var(--c-text-faint)] hover:bg-white/10 hover:text-[var(--c-text-secondary)] disabled:opacity-50"
+          >
+            <IconRefresh size={13} className={refreshingTree ? "animate-spin" : ""} />
+          </button>
+        </div>
         {multiDatabase ? (
           databases === null ? (
             <p className="p-2 text-xs text-[var(--c-text-muted)]">Chargement des bases…</p>
@@ -377,15 +526,39 @@ export function SqlTab({ connection, onError }: SqlTabProps) {
          * convention every other tab kind in this app already follows. */}
         <div className="flex min-h-0 flex-1 flex-col" style={{ display: activeSubTab === "query" ? "flex" : "none" }}>
           <div className="flex shrink-0 flex-col gap-1.5 border-b border-[var(--c-border)] p-2">
-            <textarea
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); run(); } }}
-              placeholder="SELECT * FROM ..."
-              rows={5}
-              spellCheck={false}
-              className="w-full resize-y rounded-md bg-[var(--c-bg2)] px-2 py-1.5 font-mono text-[13px] text-[var(--c-text)] placeholder:text-[var(--c-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--c-accent)]"
-            />
+            {/* Syntax highlighting is a read-only `<pre>` overlaid behind the
+             * real (transparent-text) textarea — the textarea stays the
+             * actual editable/selectable/accessible element, the `<pre>`
+             * only ever mirrors its text and scroll position. Both share
+             * the exact same font/padding/line-height so characters line
+             * up pixel-for-pixel. */}
+            <div
+              className="relative w-full resize-y overflow-hidden rounded-md bg-[var(--c-bg2)] focus-within:ring-1 focus-within:ring-[var(--c-accent)]"
+              style={{ height: "7.5rem", minHeight: "2.5rem" }}
+            >
+              <pre
+                ref={queryHighlightRef}
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre-wrap break-words px-2 py-1.5 font-mono text-[13px] leading-[1.5] text-[var(--c-text)]"
+              >
+                {highlightSql(query)}
+                {"\n"}
+              </pre>
+              <textarea
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); run(); } }}
+                onScroll={(e) => {
+                  if (queryHighlightRef.current) {
+                    queryHighlightRef.current.scrollTop = e.currentTarget.scrollTop;
+                    queryHighlightRef.current.scrollLeft = e.currentTarget.scrollLeft;
+                  }
+                }}
+                placeholder="SELECT * FROM ..."
+                spellCheck={false}
+                className="absolute inset-0 h-full w-full resize-none whitespace-pre-wrap break-words bg-transparent px-2 py-1.5 font-mono text-[13px] leading-[1.5] text-transparent caret-[var(--c-text)] placeholder:text-[var(--c-text-muted)] focus:outline-none"
+              />
+            </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={run}
